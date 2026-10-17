@@ -23,6 +23,8 @@ const workerId = randomUUID();
 let shuttingDown = false;
 let reconnectTimer;
 let gateway;
+let gatewayKeepaliveTimer;
+let gatewayPongAt = 0;
 let upstreamSessionId = null;
 let upstreamInitialized = false;
 let upstreamInitializePromise = null;
@@ -228,6 +230,27 @@ async function saveStorageState() {
   }
 }
 
+function stopGatewayKeepalive() {
+  if (gatewayKeepaliveTimer) {
+    clearInterval(gatewayKeepaliveTimer);
+    gatewayKeepaliveTimer = undefined;
+  }
+}
+
+function startGatewayKeepalive() {
+  stopGatewayKeepalive();
+  gatewayPongAt = Date.now();
+  gatewayKeepaliveTimer = setInterval(() => {
+    if (shuttingDown || !gateway || gateway.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - gatewayPongAt > 45_000) {
+      console.warn("Gateway WebSocket keepalive timed out; terminating connection");
+      gateway.terminate();
+      return;
+    }
+    gateway.ping();
+  }, 15_000);
+}
+
 function connectGateway() {
   if (shuttingDown) return;
   gateway = new WebSocket(gatewayUrl, {
@@ -236,8 +259,14 @@ function connectGateway() {
   });
 
   gateway.on("open", () => {
+    gatewayPongAt = Date.now();
+    startGatewayKeepalive();
     gateway.send(JSON.stringify({ type: "worker.hello", workerId, token: workerToken, version: "0.1.0" }));
-    console.log(`Connected to Browser MCP gateway as ${workerId}`);
+    console.log(`Gateway WebSocket opened; authenticating worker ${workerId}`);
+  });
+
+  gateway.on("pong", () => {
+    gatewayPongAt = Date.now();
   });
 
   gateway.on("message", async (raw) => {
@@ -249,7 +278,13 @@ function connectGateway() {
       return;
     }
     if (message.type === "worker.auth.ok") {
+      console.log(`Worker ${workerId} authenticated by Browser MCP gateway`);
       gateway.send(JSON.stringify({ type: "worker.ready", workerId, mcpUrl }));
+      return;
+    }
+    if (message.type === "worker.auth.failed") {
+      console.error(`Browser MCP gateway rejected worker authentication: ${message.reason ?? "unknown reason"}`);
+      gateway.close(1008, "worker authentication failed");
       return;
     }
     if (message.type === "worker.ping") {
@@ -294,6 +329,7 @@ function connectGateway() {
   });
 
   gateway.on("close", (code, reason) => {
+    stopGatewayKeepalive();
     console.warn(`Gateway disconnected (${code}): ${reason.toString()}`);
     if (!shuttingDown) reconnectTimer = setTimeout(connectGateway, 1500);
   });
@@ -305,6 +341,7 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   clearTimeout(reconnectTimer);
+  stopGatewayKeepalive();
   await saveStorageState();
   if (gateway?.readyState === WebSocket.OPEN) {
     try {
