@@ -4,7 +4,7 @@ import WebSocket from "ws";
 
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL;
 const workerToken = process.env.UTILS_BROWSER_WORKER_TOKEN;
-const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://127.0.0.1:8931/mcp";
+const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://localhost:8931/mcp";
 const maxSeconds = Number.parseInt(process.env.WORKER_MAX_SECONDS ?? "20400", 10);
 
 if (!gatewayUrl || !workerToken) {
@@ -18,13 +18,17 @@ const workerId = randomUUID();
 let shuttingDown = false;
 let reconnectTimer;
 let gateway;
+let upstreamSessionId = null;
+let upstreamInitialized = false;
+let upstreamInitializePromise = null;
 
 const playwright = spawn(
   process.execPath,
   [
     "node_modules/@playwright/mcp/cli.js",
-    "--host", "127.0.0.1",
+    "--host", "localhost",
     "--port", "8931",
+    "--allowed-hosts", "localhost:8931",
     "--browser", "chromium",
     "--headless",
     "--no-sandbox",
@@ -52,6 +56,74 @@ async function waitForMcp() {
     }
   }
   throw new Error("Timed out waiting for Playwright MCP to listen on loopback");
+}
+
+async function postMcp(payload, sessionId = null) {
+  const headers = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  };
+  if (payload.method !== "initialize") {
+    headers["mcp-protocol-version"] = "2025-06-18";
+  }
+  if (sessionId) headers["mcp-session-id"] = sessionId;
+  const response = await fetch(mcpUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = await response.text();
+  return {
+    status: response.status,
+    contentType,
+    body,
+    sessionId: response.headers.get("mcp-session-id"),
+    protocolVersion: response.headers.get("mcp-protocol-version"),
+  };
+}
+
+async function ensureUpstreamInitialized() {
+  if (upstreamInitialized) return upstreamSessionId;
+  if (upstreamInitializePromise) return upstreamInitializePromise;
+
+  upstreamInitializePromise = (async () => {
+    const initializeResponse = await postMcp({
+      jsonrpc: "2.0",
+      id: randomUUID(),
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "utils-browser-worker", version: "0.1.0" },
+      },
+    });
+    if (initializeResponse.status >= 400) {
+      throw new Error(`Playwright MCP initialize failed (${initializeResponse.status}): ${initializeResponse.body || "empty response"}`);
+    }
+    upstreamSessionId = initializeResponse.sessionId;
+    if (!upstreamSessionId) {
+      throw new Error("Playwright MCP initialize succeeded without an MCP session id");
+    }
+
+    const initializedResponse = await postMcp({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+      params: {},
+    }, upstreamSessionId);
+    if (initializedResponse.status >= 400) {
+      throw new Error(`Playwright MCP initialized notification failed (${initializedResponse.status}): ${initializedResponse.body || "empty response"}`);
+    }
+    upstreamInitialized = true;
+    return upstreamSessionId;
+  })();
+
+  try {
+    return await upstreamInitializePromise;
+  } finally {
+    upstreamInitializePromise = null;
+  }
 }
 
 function connectGateway() {
@@ -85,32 +157,29 @@ function connectGateway() {
     if (message.type !== "mcp.request" || !message.requestId || !message.payload) return;
 
     try {
-      const headers = {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        host: "localhost:8931",
-      };
-      if (message.protocolVersion) headers["mcp-protocol-version"] = message.protocolVersion;
-      if (message.sessionId) headers["mcp-session-id"] = message.sessionId;
-      const response = await fetch(mcpUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(message.payload),
-        signal: AbortSignal.timeout(120_000),
-      });
-      const contentType = response.headers.get("content-type") ?? "";
-      const body = await response.text();
-      const sessionId = response.headers.get("mcp-session-id");
-      const protocolVersion = response.headers.get("mcp-protocol-version");
+      let sessionId = upstreamSessionId;
+      if (message.payload.method === "initialize") {
+        upstreamInitialized = false;
+        upstreamSessionId = null;
+        sessionId = null;
+      } else {
+        sessionId = await ensureUpstreamInitialized();
+      }
+
+      const response = await postMcp(message.payload, sessionId);
+      if (response.sessionId) upstreamSessionId = response.sessionId;
+      if (message.payload.method === "initialize" && response.status < 400 && response.sessionId) {
+        upstreamSessionId = response.sessionId;
+      }
       gateway.send(JSON.stringify({
         type: "mcp.response",
         workerId,
         requestId: message.requestId,
         status: response.status,
-        contentType,
-        sessionId,
-        protocolVersion,
-        body,
+        contentType: response.contentType,
+        sessionId: response.sessionId,
+        protocolVersion: response.protocolVersion,
+        body: response.body,
       }));
     } catch (error) {
       gateway.send(JSON.stringify({
