@@ -4,7 +4,7 @@ import WebSocket from "ws";
 
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL;
 const workerToken = process.env.UTILS_BROWSER_WORKER_TOKEN;
-const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://127.0.0.1:8931/mcp";
+const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://localhost:8931/mcp";
 const maxSeconds = Number.parseInt(process.env.WORKER_MAX_SECONDS ?? "20400", 10);
 
 if (!gatewayUrl || !workerToken) {
@@ -23,8 +23,9 @@ const playwright = spawn(
   process.execPath,
   [
     "node_modules/@playwright/mcp/cli.js",
-    "--host", "127.0.0.1",
+    "--host", "localhost",
     "--port", "8931",
+    "--allowed-hosts", "localhost:8931",
     "--browser", "chromium",
     "--headless",
     "--no-sandbox",
@@ -88,7 +89,6 @@ function connectGateway() {
       const headers = {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        host: "localhost:8931",
       };
       if (message.protocolVersion) headers["mcp-protocol-version"] = message.protocolVersion;
       if (message.sessionId) headers["mcp-session-id"] = message.sessionId;
