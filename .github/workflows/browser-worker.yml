@@ -1,0 +1,44 @@
+name: Browser Worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Five hours leaves headroom under the hosted-runner job limit.
+    - cron: "17 */5 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-worker-singleton
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Checkout worker configuration
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install upstream Playwright MCP
+        run: npm install --no-save @playwright/mcp@latest ws@^8.18.0
+
+      - name: Install Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Run worker relay and keep browser alive
+        env:
+          UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
+          UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          PLAYWRIGHT_MCP_URL: http://127.0.0.1:8931/mcp
+          WORKER_MAX_SECONDS: "20400"
+        run: |
+          test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
+          test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
+          node src/worker.js
