@@ -32,7 +32,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p browser-worker-state
-          latest_run_id="$(gh run list --workflow browser-worker.yml --status completed --limit 1 --json databaseId --jq '.[0].databaseId')"
+          latest_run_id="$(gh run list --workflow browser-worker.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
           if [ -n "$latest_run_id" ]; then
             echo "Restoring browser state from workflow run $latest_run_id"
             if gh run download "$latest_run_id" -n browser-worker-state -D browser-worker-state; then
@@ -41,7 +41,7 @@ jobs:
               echo "No previous browser state artifact found; starting fresh"
             fi
           else
-            echo "No previous completed worker run found; starting fresh"
+            echo "No previous successful worker run found; starting fresh"
           fi
 
       - name: Install upstream Playwright MCP
