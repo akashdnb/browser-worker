@@ -2,6 +2,9 @@ name: Browser Worker
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
   schedule:
     # Run every six hours so the previous worker has time to save state before replacement.
     - cron: "17 */6 * * *"
