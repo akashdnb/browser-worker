@@ -88,7 +88,7 @@ function connectGateway() {
       const headers = {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        host: "127.0.0.1:8931",
+        host: "localhost:8931",
       };
       if (message.protocolVersion) headers["mcp-protocol-version"] = message.protocolVersion;
       if (message.sessionId) headers["mcp-session-id"] = message.sessionId;
