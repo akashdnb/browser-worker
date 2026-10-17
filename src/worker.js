@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import net from "node:net";
 import WebSocket from "ws";
 
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL;
@@ -49,8 +50,24 @@ async function waitForMcp() {
   while (Date.now() < deadline) {
     if (playwright.exitCode !== null) throw new Error("Playwright MCP process exited during startup");
     try {
-      const response = await fetch(mcpUrl, { method: "GET", signal: AbortSignal.timeout(1500) });
-      if (response.status > 0) return;
+      await new Promise((resolve, reject) => {
+        const socket = net.createConnection({ host: "127.0.0.1", port: 8931 });
+        const timer = setTimeout(() => {
+          socket.destroy();
+          reject(new Error("connection timeout"));
+        }, 1500);
+        socket.once("connect", () => {
+          clearTimeout(timer);
+          socket.end();
+          resolve();
+        });
+        socket.once("error", (error) => {
+          clearTimeout(timer);
+          socket.destroy();
+          reject(error);
+        });
+      });
+      return;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 750));
     }
