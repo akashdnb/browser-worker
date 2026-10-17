@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import dns from "node:dns/promises";
 import net from "node:net";
 import WebSocket from "ws";
 
@@ -46,33 +47,46 @@ playwright.on("exit", (code, signal) => {
 });
 
 async function waitForMcp() {
+  const url = new URL(mcpUrl);
+  const host = url.hostname;
+  const port = Number.parseInt(url.port || "80", 10);
   const deadline = Date.now() + 90_000;
+
   while (Date.now() < deadline) {
     if (playwright.exitCode !== null) throw new Error("Playwright MCP process exited during startup");
     try {
-      await new Promise((resolve, reject) => {
-        const socket = net.createConnection({ host: "127.0.0.1", port: 8931 });
-        const timer = setTimeout(() => {
-          socket.destroy();
-          reject(new Error("connection timeout"));
-        }, 1500);
-        socket.once("connect", () => {
-          clearTimeout(timer);
-          socket.end();
-          resolve();
-        });
-        socket.once("error", (error) => {
-          clearTimeout(timer);
-          socket.destroy();
-          reject(error);
-        });
-      });
-      return;
+      const addresses = await dns.lookup(host, { all: true });
+      for (const { address, family } of addresses) {
+        try {
+          await new Promise((resolve, reject) => {
+            const socket = net.createConnection({ host: address, port, family });
+            const timer = setTimeout(() => {
+              socket.destroy();
+              reject(new Error("connection timeout"));
+            }, 1500);
+            socket.once("connect", () => {
+              clearTimeout(timer);
+              socket.end();
+              resolve();
+            });
+            socket.once("error", (error) => {
+              clearTimeout(timer);
+              socket.destroy();
+              reject(error);
+            });
+          });
+          console.log(`Playwright MCP TCP listener ready on ${address}:${port}`);
+          return;
+        } catch {
+          // Try the next loopback address before waiting for the next probe.
+        }
+      }
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 750));
+      // DNS may not be ready yet; retry below.
     }
+    await new Promise((resolve) => setTimeout(resolve, 750));
   }
-  throw new Error("Timed out waiting for Playwright MCP to listen on loopback");
+  throw new Error(`Timed out waiting for Playwright MCP TCP listener at ${host}:${port}`);
 }
 
 async function postMcp(payload, sessionId = null) {
