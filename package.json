@@ -5,5 +5,5 @@
   "description": "Thin relay around the upstream Microsoft Playwright MCP server",
   "type": "module",
   "scripts": { "worker": "node src/worker.js" },
-  "dependencies": { "@playwright/mcp": "latest", "ws": "^8.18.0" }
+  "dependencies": { "@playwright/mcp": "0.0.83", "ws": "^8.18.0" }
 }
