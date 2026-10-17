@@ -86,7 +86,7 @@ function connectGateway() {
 
     try {
       const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
-      if (message.method !== "initialize" && message.protocolVersion) headers["mcp-protocol-version"] = message.protocolVersion;
+      if (message.protocolVersion) headers["mcp-protocol-version"] = message.protocolVersion;
       if (message.sessionId) headers["mcp-session-id"] = message.sessionId;
       const response = await fetch(mcpUrl, {
         method: "POST",
