@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
+import fs from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
 
@@ -8,6 +9,8 @@ const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL;
 const workerToken = process.env.UTILS_BROWSER_WORKER_TOKEN;
 const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://localhost:8931/mcp";
 const maxSeconds = Number.parseInt(process.env.WORKER_MAX_SECONDS ?? "20400", 10);
+const stateFile = process.env.BROWSER_WORKER_STATE_FILE ?? "browser-worker-state/storage-state.json";
+const initialStorageStateJson = process.env.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON;
 
 if (!gatewayUrl || !workerToken) {
   throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
@@ -34,6 +37,8 @@ const playwright = spawn(
     "--browser", "chromium",
     "--headless",
     "--no-sandbox",
+    "--caps=storage",
+    "--user-data-dir", process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? ".browser-worker-profile",
   ],
   { stdio: ["ignore", "inherit", "inherit"], env: process.env },
 );
@@ -157,6 +162,72 @@ async function ensureUpstreamInitialized() {
   }
 }
 
+function parseJsonRpcBody(body) {
+  if (!body) return null;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
+async function callUpstreamTool(name, arguments_) {
+  const sessionId = await ensureUpstreamInitialized();
+  const response = await postMcp({
+    jsonrpc: "2.0",
+    id: randomUUID(),
+    method: "tools/call",
+    params: { name, arguments: arguments_ },
+  }, sessionId);
+  if (response.status >= 400) {
+    throw new Error(`Playwright MCP tool ${name} failed (${response.status}): ${response.body || "empty response"}`);
+  }
+  const parsed = parseJsonRpcBody(response.body);
+  if (parsed?.error) {
+    throw new Error(`Playwright MCP tool ${name} failed: ${parsed.error.message || JSON.stringify(parsed.error)}`);
+  }
+  return parsed;
+}
+
+async function restoreStorageState() {
+  const existingState = await fs.stat(stateFile).then(() => true).catch(() => false);
+  if (!existingState && initialStorageStateJson) {
+    let parsed;
+    try {
+      parsed = JSON.parse(initialStorageStateJson);
+    } catch (error) {
+      throw new Error(`BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON is not valid JSON: ${error instanceof Error ? error.message : "invalid JSON"}`);
+    }
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
+      throw new Error("BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON must be a Playwright storage-state object with cookies and origins arrays");
+    }
+    await fs.mkdir(new URL(".", `file://${process.cwd()}/`), { recursive: true }).catch(() => {});
+    await fs.mkdir(stateFile.includes("/") ? stateFile.slice(0, stateFile.lastIndexOf("/")) : ".", { recursive: true });
+    await fs.writeFile(stateFile, JSON.stringify(parsed), { mode: 0o600 });
+    console.log("Seeded initial browser storage state from BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON");
+  }
+
+  const stateExistsNow = await fs.stat(stateFile).then(() => true).catch(() => false);
+  if (!stateExistsNow) {
+    console.log("No persisted browser storage state found; starting with a fresh profile");
+    return;
+  }
+
+  await callUpstreamTool("browser_set_storage_state", { filename: stateFile });
+  console.log(`Restored browser storage state from ${stateFile}`);
+}
+
+async function saveStorageState() {
+  if (!upstreamInitialized) return;
+  try {
+    await fs.mkdir(stateFile.includes("/") ? stateFile.slice(0, stateFile.lastIndexOf("/")) : ".", { recursive: true });
+    await callUpstreamTool("browser_storage_state", { filename: stateFile });
+    console.log(`Saved browser storage state to ${stateFile}`);
+  } catch (error) {
+    console.error("Failed to save browser storage state:", error instanceof Error ? error.message : error);
+  }
+}
+
 function connectGateway() {
   if (shuttingDown) return;
   gateway = new WebSocket(gatewayUrl, {
@@ -234,6 +305,7 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   clearTimeout(reconnectTimer);
+  await saveStorageState();
   if (gateway?.readyState === WebSocket.OPEN) {
     try {
       gateway.send(JSON.stringify({ type: "worker.stopping", workerId }));
@@ -250,10 +322,12 @@ process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 
 await waitForMcp();
+await ensureUpstreamInitialized();
+await restoreStorageState();
 connectGateway();
 console.log(`Worker ${workerId} started; lifetime ${maxSeconds}s`);
 setTimeout(() => {
   console.log("Worker lifecycle limit reached; stopping for scheduled replacement");
   void shutdown();
-  setTimeout(() => process.exit(0), 500).unref();
+  setTimeout(() => process.exit(0), 30_000).unref();
 }, maxSeconds * 1000).unref();
