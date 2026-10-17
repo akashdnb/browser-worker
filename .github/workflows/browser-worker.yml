@@ -3,11 +3,12 @@ name: Browser Worker
 on:
   workflow_dispatch:
   schedule:
-    # Five hours leaves headroom under the hosted-runner job limit.
-    - cron: "17 */5 * * *"
+    # Run every six hours so the previous worker has time to save state before replacement.
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: browser-worker-singleton
@@ -26,6 +27,23 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Restore previous browser storage state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p browser-worker-state
+          latest_run_id="$(gh run list --workflow browser-worker.yml --status completed --limit 1 --json databaseId --jq '.[0].databaseId')"
+          if [ -n "$latest_run_id" ]; then
+            echo "Restoring browser state from workflow run $latest_run_id"
+            if gh run download "$latest_run_id" -n browser-worker-state -D browser-worker-state; then
+              test -f browser-worker-state/storage-state.json || rm -f browser-worker-state/storage-state.json
+            else
+              echo "No previous browser state artifact found; starting fresh"
+            fi
+          else
+            echo "No previous completed worker run found; starting fresh"
+          fi
+
       - name: Install upstream Playwright MCP
         run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0
 
@@ -36,9 +54,21 @@ jobs:
         env:
           UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
+          BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
-          WORKER_MAX_SECONDS: "20400"
+          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ runner.temp }}/browser-worker-profile
+          WORKER_MAX_SECONDS: "19800"
         run: |
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
           test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
           node src/worker.js
+
+      - name: Upload browser storage state
+        if: ${{ always() && hashFiles('browser-worker-state/storage-state.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-worker-state
+          path: browser-worker-state/storage-state.json
+          retention-days: 90
+          overwrite: true
