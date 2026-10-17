@@ -96,6 +96,7 @@ function connectGateway() {
       const contentType = response.headers.get("content-type") ?? "";
       const body = await response.text();
       const sessionId = response.headers.get("mcp-session-id");
+      const protocolVersion = response.headers.get("mcp-protocol-version");
       gateway.send(JSON.stringify({
         type: "mcp.response",
         workerId,
@@ -103,6 +104,7 @@ function connectGateway() {
         status: response.status,
         contentType,
         sessionId,
+        protocolVersion,
         body,
       }));
     } catch (error) {
