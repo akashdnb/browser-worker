@@ -1,0 +1,9 @@
+{
+  "name": "utils-browser-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Thin relay around the upstream Microsoft Playwright MCP server",
+  "type": "module",
+  "scripts": { "worker": "node src/worker.js" },
+  "dependencies": { "@playwright/mcp": "latest", "ws": "^8.18.0" }
+}
