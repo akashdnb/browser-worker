@@ -95,13 +95,14 @@ function connectGateway() {
       });
       const contentType = response.headers.get("content-type") ?? "";
       const body = await response.text();
+      const sessionId = response.headers.get("mcp-session-id");
       gateway.send(JSON.stringify({
         type: "mcp.response",
         workerId,
         requestId: message.requestId,
         status: response.status,
         contentType,
-        sessionId: response.headers.get("mcp-session-id"),
+        sessionId,
         body,
       }));
     } catch (error) {
