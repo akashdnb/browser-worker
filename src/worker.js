@@ -85,7 +85,11 @@ function connectGateway() {
     if (message.type !== "mcp.request" || !message.requestId || !message.payload) return;
 
     try {
-      const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+      const headers = {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        host: "127.0.0.1:8931",
+      };
       if (message.protocolVersion) headers["mcp-protocol-version"] = message.protocolVersion;
       if (message.sessionId) headers["mcp-session-id"] = message.sessionId;
       const response = await fetch(mcpUrl, {
