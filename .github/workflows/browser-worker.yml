@@ -27,7 +27,7 @@ jobs:
           node-version: "22"
 
       - name: Install upstream Playwright MCP
-        run: npm install --no-save @playwright/mcp@latest ws@^8.18.0
+        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0
 
       - name: Install Chromium and OS dependencies
         run: npx playwright install --with-deps chromium
@@ -36,7 +36,7 @@ jobs:
         env:
           UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          PLAYWRIGHT_MCP_URL: http://127.0.0.1:8931/mcp
+          PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
           WORKER_MAX_SECONDS: "20400"
         run: |
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
