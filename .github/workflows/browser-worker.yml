@@ -2,6 +2,11 @@ name: Browser Worker
 
 on:
   workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Previous worker run whose browser state artifact must be restored"
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -29,18 +34,40 @@ jobs:
       - name: Restore previous browser storage state
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           mkdir -p browser-worker-state
-          latest_run_id="$(gh run list --workflow browser-worker.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
-          if [ -n "$latest_run_id" ]; then
-            echo "Restoring browser state from workflow run $latest_run_id"
-            if gh run download "$latest_run_id" -n browser-worker-state -D browser-worker-state; then
-              test -f browser-worker-state/storage-state.json || rm -f browser-worker-state/storage-state.json
-            else
-              echo "No previous browser state artifact found; starting fresh"
+          if [ -n "$SOURCE_RUN_ID" ]; then
+            echo "Waiting for browser state artifact from source workflow run $SOURCE_RUN_ID"
+            restored=false
+            for attempt in $(seq 1 80); do
+              if gh run download "$SOURCE_RUN_ID" -n browser-worker-state -D browser-worker-state 2>/dev/null; then
+                if [ -f browser-worker-state/storage-state.json ]; then
+                  restored=true
+                  echo "Restored browser state from source workflow run $SOURCE_RUN_ID"
+                  break
+                fi
+              fi
+              echo "Source state artifact not available yet (attempt $attempt/80); waiting 15s"
+              rm -f browser-worker-state/storage-state.json
+              sleep 15
+            done
+            if [ "$restored" != "true" ]; then
+              echo "::error::Timed out waiting for browser state artifact from source workflow run $SOURCE_RUN_ID"
+              exit 1
             fi
           else
-            echo "No previous successful worker run found; starting fresh"
+            latest_run_id="$(gh run list --workflow browser-worker.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+            if [ -n "$latest_run_id" ]; then
+              echo "Restoring browser state from workflow run $latest_run_id"
+              if gh run download "$latest_run_id" -n browser-worker-state -D browser-worker-state; then
+                test -f browser-worker-state/storage-state.json || rm -f browser-worker-state/storage-state.json
+              else
+                echo "No previous browser state artifact found; starting fresh"
+              fi
+            else
+              echo "No previous successful worker run found; starting fresh"
+            fi
           fi
 
       - name: Install upstream Playwright MCP
