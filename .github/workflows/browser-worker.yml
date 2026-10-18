@@ -6,16 +6,16 @@ on:
     branches:
       - main
   schedule:
-    # Run every six hours so the previous worker has time to save state before replacement.
+    # Safety-net restart; the active worker normally renews itself 15 minutes before expiry.
     - cron: "17 */6 * * *"
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 concurrency:
   group: browser-worker-singleton
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   browser:
@@ -62,9 +62,12 @@ jobs:
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
           PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ runner.temp }}/browser-worker-profile
           WORKER_MAX_SECONDS: "19800"
+          WORKER_RENEWAL_LEAD_SECONDS: "900"
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
           test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
+          test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
           node src/worker.js
 
       - name: Upload browser storage state
