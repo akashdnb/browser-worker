@@ -117,6 +117,19 @@ jobs:
           echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
           echo "Using shared interactive Chromium at $chromium_bin"
 
+      - name: Stop older worker runs after a push deployment
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 20 --json databaseId --jq '.[].databaseId'); do
+            if [ "$run_id" != "$CURRENT_RUN_ID" ]; then
+              echo "Cancelling stale Browser Worker run $run_id"
+              gh run cancel "$run_id" || true
+            fi
+          done
+
       - name: Run browser worker and interactive desktop
         env:
           UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
@@ -146,7 +159,7 @@ jobs:
 
           # Render may be restarting or deploying while the runner is already
           # starting. Keep the runner alive long enough for the supervisor to
-          # reconnect instead of failing the entire workflow after 60 seconds.
+          # reconnect instead of failing the workflow after 60 seconds.
           for attempt in $(seq 1 300); do
             if grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
               echo "Interactive VM relay is connected"
