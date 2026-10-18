@@ -1,21 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
-import fs from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
 
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL;
 const workerToken = process.env.UTILS_BROWSER_WORKER_TOKEN;
 const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://localhost:8931/mcp";
+const cdpEndpoint = process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
+const cdpTimeoutMs = Number.parseInt(process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT ?? "120000", 10);
 const maxSeconds = Number.parseInt(process.env.WORKER_MAX_SECONDS ?? "20400", 10);
 const renewalLeadSeconds = Number.parseInt(process.env.WORKER_RENEWAL_LEAD_SECONDS ?? "900", 10);
 const githubToken = process.env.GITHUB_TOKEN;
 const githubRepository = process.env.GITHUB_REPOSITORY;
 const githubRef = process.env.GITHUB_REF_NAME ?? "main";
 const githubRunId = process.env.GITHUB_RUN_ID;
-const stateFile = process.env.BROWSER_WORKER_STATE_FILE ?? "browser-worker-state/storage-state.json";
-const initialStorageStateJson = process.env.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON;
 
 if (!gatewayUrl || !workerToken) {
   throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
@@ -28,6 +27,9 @@ if (!Number.isFinite(renewalLeadSeconds) || renewalLeadSeconds < 60 || renewalLe
 }
 if (!githubToken || !githubRepository || !githubRunId) {
   throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_RUN_ID are required for worker self-renewal");
+}
+if (!Number.isFinite(cdpTimeoutMs) || cdpTimeoutMs < 1000) {
+  throw new Error("PLAYWRIGHT_MCP_CDP_TIMEOUT must be at least 1000ms");
 }
 
 const workerId = randomUUID();
@@ -43,6 +45,11 @@ let upstreamSessionId = null;
 let upstreamInitialized = false;
 let upstreamInitializePromise = null;
 
+// The VM owns Chromium and its persistent profile. Playwright MCP must attach
+// to that exact browser over CDP rather than launching another browser against
+// the same profile directory. This prevents profile locking and, more
+// importantly, prevents one browser instance from overwriting auth state
+// written by the other instance.
 const playwright = spawn(
   process.execPath,
   [
@@ -51,10 +58,10 @@ const playwright = spawn(
     "--port", "8931",
     "--allowed-hosts", "localhost:8931",
     "--browser", "chromium",
-    "--headless",
+    "--cdp-endpoint", cdpEndpoint,
+    "--cdp-timeout", String(cdpTimeoutMs),
     "--no-sandbox",
     "--caps=storage",
-    "--user-data-dir", process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? ".browser-worker-profile",
   ],
   { stdio: ["ignore", "inherit", "inherit"], env: process.env },
 );
@@ -67,14 +74,13 @@ playwright.on("exit", (code, signal) => {
   }
 });
 
-async function waitForMcp() {
-  const url = new URL(mcpUrl);
+async function waitForTcpEndpoint(endpoint, label, timeoutMs) {
+  const url = new URL(endpoint);
   const host = url.hostname;
-  const port = Number.parseInt(url.port || "80", 10);
-  const deadline = Date.now() + 90_000;
+  const port = Number.parseInt(url.port || (url.protocol === "https:" ? "443" : "80"), 10);
+  const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (playwright.exitCode !== null) throw new Error("Playwright MCP process exited during startup");
     try {
       const addresses = await dns.lookup(host, { all: true });
       for (const { address, family } of addresses) {
@@ -96,7 +102,7 @@ async function waitForMcp() {
               reject(error);
             });
           });
-          console.log(`Playwright MCP TCP listener ready on ${address}:${port}`);
+          console.log(`${label} TCP listener ready on ${address}:${port}`);
           return;
         } catch {
           // Try the next loopback address before waiting for the next probe.
@@ -107,7 +113,33 @@ async function waitForMcp() {
     }
     await new Promise((resolve) => setTimeout(resolve, 750));
   }
-  throw new Error(`Timed out waiting for Playwright MCP TCP listener at ${host}:${port}`);
+  throw new Error(`Timed out waiting for ${label} at ${host}:${port}`);
+}
+
+async function waitForMcp() {
+  await waitForTcpEndpoint(mcpUrl, "Playwright MCP", 90_000);
+}
+
+async function waitForCdp() {
+  const deadline = Date.now() + cdpTimeoutMs;
+  let lastError = "unknown error";
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${cdpEndpoint.replace(/\/$/, "")}/json/version`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (response.ok) {
+        const body = await response.text();
+        console.log(`Shared Chromium CDP ready at ${cdpEndpoint}: ${body.slice(0, 500)}`);
+        return;
+      }
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  throw new Error(`Timed out waiting for shared Chromium CDP at ${cdpEndpoint}: ${lastError}`);
 }
 
 async function postMcp(payload, sessionId = null) {
@@ -205,50 +237,10 @@ async function callUpstreamTool(name, arguments_) {
   return parsed;
 }
 
-async function restoreStorageState() {
-  const existingState = await fs.stat(stateFile).then(() => true).catch(() => false);
-  if (!existingState && initialStorageStateJson) {
-    let parsed;
-    try {
-      parsed = JSON.parse(initialStorageStateJson);
-    } catch (error) {
-      throw new Error(`BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON is not valid JSON: ${error instanceof Error ? error.message : "invalid JSON"}`);
-    }
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.cookies) || !Array.isArray(parsed.origins)) {
-      throw new Error("BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON must be a Playwright storage-state object with cookies and origins arrays");
-    }
-    await fs.mkdir(new URL(".", `file://${process.cwd()}/`), { recursive: true }).catch(() => {});
-    await fs.mkdir(stateFile.includes("/") ? stateFile.slice(0, stateFile.lastIndexOf("/")) : ".", { recursive: true });
-    await fs.writeFile(stateFile, JSON.stringify(parsed), { mode: 0o600 });
-    console.log("Seeded initial browser storage state from BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON");
-  }
-
-  const stateExistsNow = await fs.stat(stateFile).then(() => true).catch(() => false);
-  if (!stateExistsNow) {
-    console.log("No persisted browser storage state found; starting with a fresh profile");
-    return;
-  }
-
-  await callUpstreamTool("browser_set_storage_state", { filename: stateFile });
-  console.log(`Restored browser storage state from ${stateFile}`);
-}
-
-async function saveStorageState() {
-  if (!upstreamInitialized) return;
-  try {
-    await fs.mkdir(stateFile.includes("/") ? stateFile.slice(0, stateFile.lastIndexOf("/")) : ".", { recursive: true });
-    await callUpstreamTool("browser_storage_state", { filename: stateFile });
-    console.log(`Saved browser storage state to ${stateFile}`);
-  } catch (error) {
-    console.error("Failed to save browser storage state:", error instanceof Error ? error.message : error);
-  }
-}
-
 async function triggerReplacementWorkflow() {
   if (renewalTriggered || shuttingDown) return;
   renewalTriggered = true;
   try {
-    await saveStorageState();
     const url = `https://api.github.com/repos/${githubRepository}/actions/workflows/browser-worker.yml/dispatches`;
     const response = await fetch(url, {
       method: "POST",
@@ -317,7 +309,7 @@ function connectGateway() {
   gateway.on("open", () => {
     gatewayPongAt = Date.now();
     startGatewayKeepalive();
-    gateway.send(JSON.stringify({ type: "worker.hello", workerId, token: workerToken, version: "0.1.0" }));
+    gateway.send(JSON.stringify({ type: "worker.hello", workerId, token: workerToken, version: "0.2.0" }));
     console.log(`Gateway WebSocket opened; authenticating worker ${workerId}`);
   });
 
@@ -405,7 +397,6 @@ async function shutdown() {
   clearTimeout(renewalTimer);
   clearTimeout(renewalRetryTimer);
   stopGatewayKeepalive();
-  await saveStorageState();
   if (gateway?.readyState === WebSocket.OPEN) {
     try {
       gateway.send(JSON.stringify({ type: "worker.stopping", workerId }));
@@ -414,6 +405,7 @@ async function shutdown() {
       // Best effort; process is terminating.
     }
   }
+  // MCP only owns the HTTP server now; Chromium remains owned by vm.js.
   playwright.kill("SIGTERM");
   setTimeout(() => playwright.kill("SIGKILL"), 3000).unref();
 }
@@ -421,12 +413,12 @@ async function shutdown() {
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 
+await waitForCdp();
 await waitForMcp();
 await ensureUpstreamInitialized();
-await restoreStorageState();
 connectGateway();
 scheduleReplacement();
-console.log(`Worker ${workerId} started; lifetime ${maxSeconds}s`);
+console.log(`Worker ${workerId} started; lifetime ${maxSeconds}s; shared browser=${cdpEndpoint}`);
 setTimeout(() => {
   console.log("Worker lifecycle limit reached; stopping for scheduled replacement");
   void shutdown();
