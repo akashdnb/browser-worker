@@ -8,7 +8,8 @@ Disposable Chromium worker for the private `akashdnb/utils` Browser MCP gateway.
 - Microsoft Playwright MCP runs locally with Chromium and Streamable HTTP on loopback.
 - The worker opens an outbound WebSocket to `utils` and relays MCP JSON-RPC requests/responses over that connection.
 - `utils` remains the only agent-facing Browser MCP endpoint. The worker has no public inbound listener.
-- The job is capped below six hours. The schedule runs the worker every five hours; a new scheduled run replaces the previous run through GitHub Actions concurrency.
+- The job is capped below six hours. A six-hour scheduled run is only a safety net; the worker normally renews itself 15 minutes before its limit, passing the current run ID so its latest Chromium profile is restored.
+- Delayed schedule/push starts are skipped if a worker is already active, preventing an older successful profile artifact from overwriting the live profile.
 
 ## Repository setup
 
@@ -17,7 +18,7 @@ Add these GitHub Actions repository secrets:
 - `UTILS_BROWSER_WORKER_URL`: `wss://utils-l1pw.onrender.com/browser-worker`
 - `UTILS_BROWSER_WORKER_TOKEN`: same value as the `RENDER_MCP_BROWSER_WORKER_TOKEN` environment variable on the `utils` Render service.
 
-Dispatch **Browser Worker** from the Actions tab to start a worker. The scheduled workflow runs every five hours and is intended to keep a worker available. GitHub schedules can be delayed; inspect the Actions run if the worker doesn't appear.
+Dispatch **Browser Worker** from the Actions tab to start a worker when none is active. Use **Restart Browser Worker** for an intentional manual restart; it archives the active profile first. If multiple workers overlap, it refuses to guess which profile is current. GitHub schedules can be delayed; an overlapping safety-net run is skipped rather than replacing the active session.
 
 ## Security notes
 
