@@ -137,6 +137,16 @@ async function handleCommand(payload) {
   if (action === "status") {
     return { ok: true, workerId, display, browser: chromium, platform: process.platform, userDataDir, cdpPort };
   }
+  if (action === "restore_browser") {
+    return await new Promise((resolve) => {
+      const child = spawn("bash", ["-lc", "windows=$(xdotool search --class chromium 2>/dev/null || true); test -n \"$windows\" || { echo 'Chromium window not found' >&2; exit 1; }; for window in $windows; do xdotool windowmap $window 2>/dev/null || true; xdotool windowactivate --sync $window 2>/dev/null || true; xdotool windowraise $window 2>/dev/null || true; xdotool windowsize $window 1440 900 2>/dev/null || true; done"], { env: { ...process.env, DISPLAY: display }, stdio: ["ignore", "pipe", "pipe"] });
+      let output = "";
+      child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+      child.stderr.on("data", (chunk) => { output += chunk.toString(); });
+      const timer = setTimeout(() => { child.kill("SIGKILL"); resolve({ ok: false, error: "restore command timed out" }); }, 10_000);
+      child.on("exit", (code) => { clearTimeout(timer); resolve({ ok: code === 0, returncode: code ?? -1, output: output.trim() }); });
+    });
+  }
   if (action === "exec") {
     const command = payload?.command;
     if (typeof command !== "string" || !command.trim() || command.length > 4000) throw new Error("command must be a non-empty string of at most 4000 characters");
