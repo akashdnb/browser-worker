@@ -73,7 +73,25 @@ async function startDesktop() {
     "--user-data-dir=/tmp/interactive-vm-chromium",
     "about:blank",
   ], env);
-  start(["x11vnc", "-display", display, "-localhost", "-forever", "-shared", "-rfbport", String(vncPort), "-nopw"], env);
+  // Keep the Xvfb/x11vnc combination interactive. These flags are important
+  // on virtual X displays: XKB enables normal keyboard mapping, while the
+  // explicit input mask and always-inject make pointer/button events reach
+  // XTest reliably through x11vnc.
+  start([
+    "x11vnc",
+    "-display", display,
+    "-localhost",
+    "-forever",
+    "-shared",
+    "-rfbport", String(vncPort),
+    "-nopw",
+    "-xkb",
+    "-noxrecord",
+    "-noxfixes",
+    "-noxdamage",
+    "-always_inject",
+    "-input", "KMBC",
+  ], env);
 }
 
 async function handleCommand(payload) {
