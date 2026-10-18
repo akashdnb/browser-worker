@@ -97,6 +97,23 @@ async function cleanProfileLocks() {
 async function startDesktop() {
   const env = { ...process.env, DISPLAY: display };
   await cleanProfileLocks();
+
+  // On a VM relay reconnect the previous desktop may still be exiting. Reuse
+  // an already running local service when possible rather than spawning a
+  // second Chromium against the same user profile or racing the CDP port.
+  try {
+    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    if (response.ok) {
+      console.log(`Reusing existing Chromium CDP listener on 127.0.0.1:${cdpPort}`);
+      await waitForPort("127.0.0.1", vncPort, 10_000).catch(() => {});
+      return;
+    }
+  } catch {
+    // No existing browser; start a fresh desktop below.
+  }
+
   start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env);
   await sleep(1000);
   start(["openbox"], env);
@@ -130,6 +147,18 @@ async function startDesktop() {
     "-always_inject",
     "-input", "KMBC",
   ], env);
+
+  // Do not announce the VM bridge before Chromium is actually available.
+  if (!(await probeCdp(30_000))) {
+    const browserProcesses = processes.filter((child) => {
+      const command = child.spawnargs?.[0] ?? "";
+      return command === chromium;
+    });
+    for (const child of browserProcesses) {
+      if (!child.killed) child.kill("SIGTERM");
+    }
+    throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
+  }
 }
 
 function clampTimeoutSeconds(value) {
