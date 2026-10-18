@@ -169,7 +169,6 @@ async function startDesktop() {
     `--remote-debugging-port=${cdpPort}`,
     "--remote-allow-origins=*",
     `--user-data-dir=${userDataDir}`,
-    "about:blank",
   ], env);
   start([
     "x11vnc",
