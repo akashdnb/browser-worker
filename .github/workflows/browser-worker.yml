@@ -14,9 +14,10 @@ on:
     # Safety-net restart; the active worker normally renews itself 15 minutes before expiry.
     - cron: "17 */6 * * *"
 
-# Pushes are deployments of the worker code and should supersede older push
-# runs. Self-renewal/manual runs use unique groups so the handoff can overlap
-# the current worker long enough to restore its browser profile artifact.
+# Self-renewal handoffs carry an explicit source run ID so the active profile
+# is archived/restored safely. A serialized preflight skips delayed schedule,
+# push, or manual starts that would otherwise replace an active worker with a
+# stale last-successful profile snapshot.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
@@ -26,7 +27,46 @@ permissions:
   actions: write
 
 jobs:
+  # Serialize only the preflight checks. This closes the race where a delayed
+  # scheduled run starts beside a live worker and restores an older successful
+  # profile snapshot over the active Chromium profile.
+  guard:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: browser-worker-guard-${{ github.ref }}
+      cancel-in-progress: false
+    outputs:
+      should_start: ${{ steps.check.outputs.should_start }}
+    steps:
+      - name: Skip if an interactive worker is already running
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Self-renewal handoffs explicitly name their source run and must be
+          # allowed to overlap it while waiting for its profile artifact.
+          if [ -n "$SOURCE_RUN_ID" ]; then
+            echo "Explicit profile handoff from run $SOURCE_RUN_ID"
+            echo "should_start=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          if [ -n "$active_run_id" ]; then
+            echo "::notice::Skipping $EVENT_NAME start: Browser Worker run $active_run_id is already active. Let it retain the current Chromium profile."
+            echo "should_start=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No other Browser Worker run is active"
+            echo "should_start=true" >> "$GITHUB_OUTPUT"
+          fi
+
   browser:
+    needs: guard
+    if: needs.guard.outputs.should_start == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
