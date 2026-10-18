@@ -2,14 +2,15 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import WebSocket from "ws";
 
-const utilsUrl = process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, "");
+const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, "");
+const utilsBaseUrl = gatewayUrl?.replace(/\/browser-worker\/?$/, "");
 const token = process.env.UTILS_BROWSER_WORKER_TOKEN;
 const workerId = process.env.VM_WORKER_ID ?? `github-${process.env.GITHUB_RUN_ID ?? process.pid}`;
 const display = process.env.DISPLAY ?? ":99";
 const vncPort = Number.parseInt(process.env.VM_VNC_PORT ?? "5900", 10);
 const chromium = process.env.CHROMIUM_BIN;
 
-if (!utilsUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
+if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
 if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
 
 const processes = [];
@@ -132,7 +133,7 @@ async function main() {
   await startDesktop();
   await waitForPort("127.0.0.1", vncPort);
 
-  const uri = `${utilsUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
+  const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
   const websocket = new WebSocket(uri, { maxPayload: 16 * 1024 * 1024, handshakeTimeout: 15_000 });
 
   websocket.on("open", () => {
@@ -174,6 +175,8 @@ async function main() {
       }
     }
   });
+
+  websocket.on("error", (error) => console.error("Interactive VM WebSocket error:", error.message));
 
   const heartbeat = setInterval(() => {
     if (websocket.readyState === WebSocket.OPEN) websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
