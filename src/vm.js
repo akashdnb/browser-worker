@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
 
@@ -132,35 +132,70 @@ async function startDesktop() {
   ], env);
 }
 
+function clampTimeoutSeconds(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(300, Math.max(1, parsed)) : 60;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+async function runCommand(command, timeoutSeconds = 60) {
+  return await new Promise((resolve) => {
+    const child = spawn("bash", ["-lc", command], { env: { ...process.env, DISPLAY: display }, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk.toString(); if (output.length > 20000) output = output.slice(-20000); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString(); if (output.length > 20000) output = output.slice(-20000); });
+    const timer = setTimeout(() => { child.kill("SIGKILL"); resolve({ ok: false, error: "command timed out" }); }, clampTimeoutSeconds(timeoutSeconds) * 1000);
+    child.on("exit", (code) => { clearTimeout(timer); resolve({ ok: code === 0, returncode: code ?? -1, output }); });
+  });
+}
+
 async function handleCommand(payload) {
   const action = payload?.action;
   if (action === "status") {
-    return { ok: true, workerId, display, browser: chromium, platform: process.platform, userDataDir, cdpPort };
+    return {
+      ok: true,
+      workerId,
+      display,
+      browser: chromium,
+      platform: process.platform,
+      userDataDir,
+      cdpPort,
+      cwd: process.cwd(),
+      capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
+    };
   }
   if (action === "restore_browser") {
-    return await new Promise((resolve) => {
-      const child = spawn("bash", ["-lc", "windows=$(xdotool search --class chromium 2>/dev/null || true); test -n \"$windows\" || { echo 'Chromium window not found' >&2; exit 1; }; for window in $windows; do xdotool windowmap $window 2>/dev/null || true; xdotool windowactivate --sync $window 2>/dev/null || true; xdotool windowraise $window 2>/dev/null || true; xdotool windowsize $window 1440 900 2>/dev/null || true; done"], { env: { ...process.env, DISPLAY: display }, stdio: ["ignore", "pipe", "pipe"] });
-      let output = "";
-      child.stdout.on("data", (chunk) => { output += chunk.toString(); });
-      child.stderr.on("data", (chunk) => { output += chunk.toString(); });
-      const timer = setTimeout(() => { child.kill("SIGKILL"); resolve({ ok: false, error: "restore command timed out" }); }, 10_000);
-      child.on("exit", (code) => { clearTimeout(timer); resolve({ ok: code === 0, returncode: code ?? -1, output: output.trim() }); });
-    });
+    return await runCommand("windows=$(xdotool search --class chromium 2>/dev/null || true); test -n \"$windows\" || { echo 'Chromium window not found' >&2; exit 1; }; for window in $windows; do xdotool windowmap $window 2>/dev/null || true; xdotool windowactivate --sync $window 2>/dev/null || true; xdotool windowraise $window 2>/dev/null || true; xdotool windowsize $window 1440 900 2>/dev/null || true; done", 10);
   }
   if (action === "exec") {
     const command = payload?.command;
     if (typeof command !== "string" || !command.trim() || command.length > 4000) throw new Error("command must be a non-empty string of at most 4000 characters");
-    return await new Promise((resolve) => {
-      const child = spawn("bash", ["-lc", command], { env: { ...process.env, DISPLAY: display }, stdio: ["ignore", "pipe", "pipe"] });
-      let output = "";
-      child.stdout.on("data", (chunk) => { output += chunk.toString(); if (output.length > 20000) output = output.slice(-20000); });
-      child.stderr.on("data", (chunk) => { output += chunk.toString(); if (output.length > 20000) output = output.slice(-20000); });
-      const timer = setTimeout(() => { child.kill("SIGKILL"); resolve({ ok: false, error: "command timed out" }); }, 60_000);
-      child.on("exit", (code) => { clearTimeout(timer); resolve({ ok: code === 0, returncode: code ?? -1, output }); });
-    });
+    return await runCommand(command, payload?.timeout_seconds);
+  }
+  if (action === "read_file") {
+    const path = payload?.path;
+    const maxBytes = Math.min(1_048_576, Math.max(1, Number(payload?.max_bytes ?? 262_144)));
+    if (typeof path !== "string" || !path.trim()) throw new Error("path must be a non-empty string");
+    const bytes = await readFile(path);
+    if (bytes.length > maxBytes) throw new Error(`file is ${bytes.length} bytes; max_bytes is ${maxBytes}`);
+    return { ok: true, path, content: bytes.toString("utf8"), bytes: bytes.length };
+  }
+  if (action === "write_file") {
+    const path = payload?.path;
+    const content = payload?.content;
+    if (typeof path !== "string" || !path.trim()) throw new Error("path must be a non-empty string");
+    if (typeof content !== "string") throw new Error("content must be a string");
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes > 1_048_576) throw new Error("content must be at most 1 MiB");
+    const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
+    await mkdir(parent, { recursive: true });
+    await writeFile(path, content, { encoding: "utf8", mode: 0o600 });
+    return { ok: true, path, bytes };
   }
   if (action === "list_files") {
-    const { readdir, stat } = await import("node:fs/promises");
     const path = payload?.path || process.cwd();
     const entries = await readdir(path, { withFileTypes: true });
     const files = [];
@@ -169,6 +204,47 @@ async function handleCommand(payload) {
       files.push({ name: entry.name, directory: entry.isDirectory(), size: entry.isFile() ? (await stat(fullPath)).size : null });
     }
     return { ok: true, path, files };
+  }
+  if (action === "search_files") {
+    const pattern = payload?.pattern;
+    const path = payload?.path || ".";
+    const maxResults = Math.min(500, Math.max(1, Number(payload?.max_results ?? 100)));
+    if (typeof pattern !== "string" || !pattern.trim()) throw new Error("pattern must be a non-empty string");
+    if (pattern.length > 500) throw new Error("pattern must be at most 500 characters");
+    const escapedPattern = shellQuote(pattern);
+    const escapedPath = shellQuote(path);
+    const command = `if command -v rg >/dev/null 2>&1; then rg --line-number --no-heading --hidden --glob '!.git' --glob '!node_modules' --max-count 20 -- ${escapedPattern} ${escapedPath} | head -n ${maxResults}; else grep -RIn --exclude-dir=.git --exclude-dir=node_modules -- ${escapedPattern} ${escapedPath} 2>/dev/null | head -n ${maxResults}; fi`;
+    return await runCommand(command, 30);
+  }
+  if (action === "processes") {
+    return await runCommand("ps -eo pid=,ppid=,stat=,etime=,comm=,args= --sort=-etime | head -n 250", 10);
+  }
+  if (action === "kill_process") {
+    const pid = Number(payload?.pid);
+    const signal = Number(payload?.signal ?? 15);
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error("pid must be a positive integer");
+    if (!Number.isInteger(signal) || signal < 1 || signal > 64) throw new Error("signal must be between 1 and 64");
+    try {
+      process.kill(pid, signal);
+      return { ok: true, pid, signal };
+    } catch (error) {
+      return { ok: false, pid, signal, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  if (action === "screenshot") {
+    const path = "/tmp/interactive-vm-screen.png";
+    const result = await runCommand(`scrot -o ${shellQuote(path)}`, 15);
+    if (!result.ok) return result;
+    const image = await readFile(path);
+    return { ok: true, mime_type: "image/png", bytes: image.length, base64: image.toString("base64") };
+  }
+  if (action === "install_package") {
+    const packageName = payload?.package;
+    const manager = payload?.manager;
+    if (typeof packageName !== "string" || !/^[A-Za-z0-9_@./:+-]+$/.test(packageName)) throw new Error("invalid package name");
+    if (manager === "apt") return await runCommand(`sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -- ${shellQuote(packageName)}`, 300);
+    if (manager === "npm") return await runCommand(`npm install -g ${shellQuote(packageName)}`, 300);
+    throw new Error("manager must be apt or npm");
   }
   if (action === "open_url") {
     const url = payload?.url;
@@ -211,7 +287,7 @@ async function main() {
   const websocket = new WebSocket(uri, { maxPayload: 16 * 1024 * 1024, handshakeTimeout: 15_000 });
 
   websocket.on("open", () => {
-    websocket.send(JSON.stringify({ type: "vm.hello", token, workerId, capabilities: ["desktop", "browser", "terminal", "files"] }));
+    websocket.send(JSON.stringify({ type: "vm.hello", token, workerId, capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"] }));
     console.log(`Interactive VM connected to utils as ${workerId}`);
     console.log(`Shared Chromium is expected on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
     void probeCdp();
