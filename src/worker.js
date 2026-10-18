@@ -13,6 +13,7 @@ const renewalLeadSeconds = Number.parseInt(process.env.WORKER_RENEWAL_LEAD_SECON
 const githubToken = process.env.GITHUB_TOKEN;
 const githubRepository = process.env.GITHUB_REPOSITORY;
 const githubRef = process.env.GITHUB_REF_NAME ?? "main";
+const githubRunId = process.env.GITHUB_RUN_ID;
 const stateFile = process.env.BROWSER_WORKER_STATE_FILE ?? "browser-worker-state/storage-state.json";
 const initialStorageStateJson = process.env.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON;
 
@@ -25,8 +26,8 @@ if (!Number.isFinite(maxSeconds) || maxSeconds < 60 || maxSeconds > 21000) {
 if (!Number.isFinite(renewalLeadSeconds) || renewalLeadSeconds < 60 || renewalLeadSeconds >= maxSeconds) {
   throw new Error("WORKER_RENEWAL_LEAD_SECONDS must be at least 60 and less than WORKER_MAX_SECONDS");
 }
-if (!githubToken || !githubRepository) {
-  throw new Error("GITHUB_TOKEN and GITHUB_REPOSITORY are required for worker self-renewal");
+if (!githubToken || !githubRepository || !githubRunId) {
+  throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_RUN_ID are required for worker self-renewal");
 }
 
 const workerId = randomUUID();
@@ -246,8 +247,9 @@ async function saveStorageState() {
 async function triggerReplacementWorkflow() {
   if (renewalTriggered || shuttingDown) return;
   renewalTriggered = true;
-  const url = `https://api.github.com/repos/${githubRepository}/actions/workflows/browser-worker.yml/dispatches`;
   try {
+    await saveStorageState();
+    const url = `https://api.github.com/repos/${githubRepository}/actions/workflows/browser-worker.yml/dispatches`;
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -257,13 +259,17 @@ async function triggerReplacementWorkflow() {
         "content-type": "application/json",
         "user-agent": "signalai-browser-worker",
       },
-      body: JSON.stringify({ ref: githubRef }),
+      body: JSON.stringify({
+        ref: githubRef,
+        inputs: { source_run_id: githubRunId },
+      }),
     });
     if (!response.ok) {
       const body = await response.text();
       throw new Error(`GitHub workflow dispatch failed (${response.status}): ${body || "empty response"}`);
     }
-    console.log(`Triggered replacement Browser Worker workflow for ${githubRepository}@${githubRef}`);
+    console.log(`Triggered replacement Browser Worker workflow for ${githubRepository}@${githubRef} from run ${githubRunId}`);
+    setTimeout(() => void shutdown(), 30_000).unref();
   } catch (error) {
     renewalTriggered = false;
     console.error("Failed to trigger replacement Browser Worker workflow:", error instanceof Error ? error.message : error);
