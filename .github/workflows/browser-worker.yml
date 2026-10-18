@@ -14,6 +14,13 @@ on:
     # Safety-net restart; the active worker normally renews itself 15 minutes before expiry.
     - cron: "17 */6 * * *"
 
+# Pushes are deployments of the worker code and should supersede older push
+# runs. Self-renewal/manual runs use unique groups so the handoff can overlap
+# the current worker long enough to restore its state artifact.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 permissions:
   contents: read
   actions: write
