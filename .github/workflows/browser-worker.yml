@@ -140,25 +140,28 @@ jobs:
           test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
           test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
 
-          node src/vm.js > "$RUNNER_TEMP/interactive-vm.log" 2>&1 &
+          bash src/vm-supervisor.sh > "$RUNNER_TEMP/interactive-vm.log" 2>&1 &
           vm_pid=$!
           trap 'kill "$vm_pid" 2>/dev/null || true; wait "$vm_pid" 2>/dev/null || true' EXIT
 
-          for attempt in $(seq 1 60); do
+          # Render may be restarting or deploying while the runner is already
+          # starting. Keep the runner alive long enough for the supervisor to
+          # reconnect instead of failing the entire workflow after 60 seconds.
+          for attempt in $(seq 1 300); do
             if grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
               echo "Interactive VM relay is connected"
               break
             fi
             if ! kill -0 "$vm_pid" 2>/dev/null; then
-              echo "::error::Interactive VM relay exited during startup"
+              echo "::error::Interactive VM supervisor exited during startup"
               cat "$RUNNER_TEMP/interactive-vm.log"
               exit 1
             fi
             sleep 1
           done
 
-          if ! grep -q "Interactive VM relay is connected" "$RUNNER_TEMP/interactive-vm.log" && ! grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
-            echo "::error::Interactive VM relay did not connect to utils within 60 seconds"
+          if ! grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+            echo "::error::Interactive VM relay did not connect to utils within 5 minutes"
             cat "$RUNNER_TEMP/interactive-vm.log"
             exit 1
           fi
