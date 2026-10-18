@@ -62,6 +62,29 @@ async function waitForPort(host, port, timeoutMs = 20_000) {
   throw new Error(`Timed out waiting for ${host}:${port}`);
 }
 
+async function probeCdp(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "unknown error";
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
+        signal: AbortSignal.timeout(1500),
+      });
+      if (response.ok) {
+        const body = await response.text();
+        console.log(`Chromium CDP ready on 127.0.0.1:${cdpPort}: ${body.slice(0, 500)}`);
+        return true;
+      }
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await sleep(500);
+  }
+  console.error(`Chromium CDP did not become ready on 127.0.0.1:${cdpPort}: ${lastError}`);
+  return false;
+}
+
 async function cleanProfileLocks() {
   await Promise.all([
     rm(`${userDataDir}/SingletonLock`, { force: true }),
@@ -88,6 +111,7 @@ async function startDesktop() {
     "--password-store=basic",
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${cdpPort}`,
+    "--remote-allow-origins=*",
     "--user-data-dir", userDataDir,
     "about:blank",
   ], env);
@@ -172,7 +196,6 @@ function disconnectAllVnc() {
 async function main() {
   await startDesktop();
   await waitForPort("127.0.0.1", vncPort);
-  await waitForPort("127.0.0.1", cdpPort);
 
   const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
   const websocket = new WebSocket(uri, { maxPayload: 16 * 1024 * 1024, handshakeTimeout: 15_000 });
@@ -180,7 +203,8 @@ async function main() {
   websocket.on("open", () => {
     websocket.send(JSON.stringify({ type: "vm.hello", token, workerId, capabilities: ["desktop", "browser", "terminal", "files"] }));
     console.log(`Interactive VM connected to utils as ${workerId}`);
-    console.log(`Shared Chromium ready for MCP over CDP on 127.0.0.1:${cdpPort} using ${userDataDir}`);
+    console.log(`Shared Chromium is expected on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
+    void probeCdp();
   });
 
   websocket.on("message", async (raw, isBinary) => {
