@@ -14,6 +14,7 @@ if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM"
 
 const processes = [];
 let stopping = false;
+let vncSocket;
 
 function start(command, env = process.env) {
   const child = spawn(command[0], command.slice(1), { env, stdio: ["ignore", "inherit", "inherit"] });
@@ -110,6 +111,22 @@ async function handleCommand(payload) {
   throw new Error(`unknown action: ${action}`);
 }
 
+async function connectVnc(websocket) {
+  if (vncSocket && !vncSocket.destroyed) return;
+  await waitForPort("127.0.0.1", vncPort);
+  vncSocket = net.createConnection({ host: "127.0.0.1", port: vncPort });
+  vncSocket.on("data", (chunk) => {
+    if (websocket.readyState === WebSocket.OPEN) websocket.send(chunk);
+  });
+  vncSocket.on("error", (error) => console.error("VNC socket error:", error.message));
+  vncSocket.on("close", () => { vncSocket = undefined; });
+}
+
+function disconnectVnc() {
+  if (vncSocket && !vncSocket.destroyed) vncSocket.destroy();
+  vncSocket = undefined;
+}
+
 async function main() {
   startDesktop();
   await waitForPort("127.0.0.1", vncPort);
@@ -134,6 +151,19 @@ async function main() {
       websocket.close();
       return;
     }
+    if (message.type === "vm.desktop.start") {
+      try {
+        await connectVnc(websocket);
+        console.log("Interactive VM VNC bridge attached");
+      } catch (error) {
+        console.error("Failed to connect VNC bridge:", error instanceof Error ? error.message : error);
+      }
+      return;
+    }
+    if (message.type === "vm.desktop.stop") {
+      disconnectVnc();
+      return;
+    }
     if (message.type === "vm.command") {
       try {
         const result = await handleCommand(message.payload ?? {});
@@ -144,23 +174,19 @@ async function main() {
     }
   });
 
-  let vncSocket;
-  vncSocket = net.createConnection({ host: "127.0.0.1", port: vncPort });
-  vncSocket.on("data", (chunk) => { if (websocket.readyState === WebSocket.OPEN) websocket.send(chunk); });
-  vncSocket.on("error", (error) => console.error("VNC socket error:", error.message));
-  vncSocket.on("close", () => { if (!stopping) websocket.close(); });
-
   const heartbeat = setInterval(() => {
     if (websocket.readyState === WebSocket.OPEN) websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
   }, 15_000);
 
   await new Promise((resolve) => websocket.on("close", resolve));
   clearInterval(heartbeat);
+  disconnectVnc();
 }
 
 async function shutdown() {
   if (stopping) return;
   stopping = true;
+  disconnectVnc();
   for (const child of [...processes].reverse()) {
     if (!child.killed) child.kill("SIGTERM");
   }
