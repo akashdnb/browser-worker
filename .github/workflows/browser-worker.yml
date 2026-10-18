@@ -121,6 +121,18 @@ jobs:
               rm -rf "$extracted"
               return 1
             fi
+
+            # Compatibility for archives written by the older workflow, which
+            # deleted CacheStorage while archiving. A profile recovery handoff
+            # may stage that directory as a sibling to survive the old cleanup.
+            local cache_backup="$extracted/browser-worker-profile/Default/Service Worker/CacheStorage.preserved"
+            local cache_target="$extracted/browser-worker-profile/Default/Service Worker/CacheStorage"
+            if [ -d "$cache_backup" ]; then
+              rm -rf "$cache_target"
+              mv "$cache_backup" "$cache_target"
+              echo "Restored preserved Service Worker CacheStorage from legacy profile archive"
+            fi
+
             rm -rf "$RUNNER_TEMP/browser-worker-profile"
             mv "$extracted/browser-worker-profile" "$RUNNER_TEMP/browser-worker-profile"
             rm -rf "$extracted"
