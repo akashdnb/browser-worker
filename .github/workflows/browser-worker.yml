@@ -38,6 +38,11 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Set up interactive desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc openbox
+
       - name: Restore previous browser storage state
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,7 +88,14 @@ jobs:
       - name: Install Chromium and OS dependencies
         run: npx playwright install --with-deps chromium
 
-      - name: Run worker relay and keep browser alive
+      - name: Resolve Chromium executable
+        run: |
+          chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
+          test -n "$chromium_bin"
+          echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
+          echo "Using interactive Chromium at $chromium_bin"
+
+      - name: Run browser worker and interactive desktop
         env:
           UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
@@ -94,10 +106,37 @@ jobs:
           WORKER_MAX_SECONDS: "19800"
           WORKER_RENEWAL_LEAD_SECONDS: "900"
           GITHUB_TOKEN: ${{ github.token }}
+          VM_WORKER_ID: github-${{ github.run_id }}
+          DISPLAY: ":99"
         run: |
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
           test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
           test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
+          test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
+
+          node src/vm.js > "$RUNNER_TEMP/interactive-vm.log" 2>&1 &
+          vm_pid=$!
+          trap 'kill "$vm_pid" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 60); do
+            if grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+              echo "Interactive VM relay is connected"
+              break
+            fi
+            if ! kill -0 "$vm_pid" 2>/dev/null; then
+              echo "::error::Interactive VM relay exited during startup"
+              cat "$RUNNER_TEMP/interactive-vm.log"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if ! grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+            echo "::error::Interactive VM relay did not connect to utils within 60 seconds"
+            cat "$RUNNER_TEMP/interactive-vm.log"
+            exit 1
+          fi
+
           node src/worker.js
 
       - name: Upload browser storage state
