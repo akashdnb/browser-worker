@@ -133,6 +133,7 @@ jobs:
           VM_WORKER_ID: github-${{ github.run_id }}
           VM_CHROMIUM_DEBUG_PORT: "9222"
           DISPLAY: ":99"
+          NODE_OPTIONS: "--import=./src/vm-heartbeat-hook.mjs"
         run: |
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
           test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
