@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { rm } from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
 
@@ -16,8 +17,8 @@ if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKE
 if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
 
 const processes = [];
+const vncSockets = new Map();
 let stopping = false;
-let vncSocket;
 
 function start(command, env = process.env) {
   const child = spawn(command[0], command.slice(1), { env, stdio: ["ignore", "inherit", "inherit"] });
@@ -61,8 +62,18 @@ async function waitForPort(host, port, timeoutMs = 20_000) {
   throw new Error(`Timed out waiting for ${host}:${port}`);
 }
 
+async function cleanProfileLocks() {
+  await Promise.all([
+    rm(`${userDataDir}/SingletonLock`, { force: true }),
+    rm(`${userDataDir}/SingletonCookie`, { force: true }),
+    rm(`${userDataDir}/SingletonSocket`, { force: true }),
+    rm(`${userDataDir}/DevToolsActivePort`, { force: true }),
+  ]);
+}
+
 async function startDesktop() {
   const env = { ...process.env, DISPLAY: display };
+  await cleanProfileLocks();
   start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env);
   await sleep(1000);
   start(["openbox"], env);
@@ -76,14 +87,10 @@ async function startDesktop() {
     "--no-default-browser-check",
     "--password-store=basic",
     "--remote-debugging-address=127.0.0.1",
-    "--remote-debugging-port", String(cdpPort),
+    `--remote-debugging-port=${cdpPort}`,
     "--user-data-dir", userDataDir,
     "about:blank",
   ], env);
-  // Keep the Xvfb/x11vnc combination interactive. These flags are important
-  // on virtual X displays: XKB enables normal keyboard mapping, while the
-  // explicit input mask and always-inject make pointer/button events reach
-  // XTest reliably through x11vnc.
   start([
     "x11vnc",
     "-display", display,
@@ -138,29 +145,28 @@ async function handleCommand(payload) {
   throw new Error(`unknown action: ${action}`);
 }
 
-async function connectVnc(websocket) {
-  // Each browser WebSocket needs a fresh VNC protocol session. Reusing an
-  // existing TCP connection after a page refresh leaves noVNC out of sync:
-  // it receives framebuffer bytes from the previous session where it expects
-  // the new RFB handshake, producing "Unexpected server message" errors and
-  // making the desktop look connected while ignoring all input.
-  disconnectVnc();
+async function connectVnc(websocket, clientId) {
   await waitForPort("127.0.0.1", vncPort);
+  disconnectVnc(clientId);
   const socket = net.createConnection({ host: "127.0.0.1", port: vncPort });
-  vncSocket = socket;
+  vncSockets.set(clientId, socket);
   socket.on("data", (chunk) => {
-    if (websocket.readyState === WebSocket.OPEN && vncSocket === socket) websocket.send(chunk);
+    if (websocket.readyState === WebSocket.OPEN && vncSockets.get(clientId) === socket) websocket.send(chunk);
   });
-  socket.on("error", (error) => console.error("VNC socket error:", error.message));
+  socket.on("error", (error) => console.error(`VNC socket error (${clientId}):`, error.message));
   socket.on("close", () => {
-    if (vncSocket === socket) vncSocket = undefined;
+    if (vncSockets.get(clientId) === socket) vncSockets.delete(clientId);
   });
 }
 
-function disconnectVnc() {
-  const socket = vncSocket;
-  vncSocket = undefined;
+function disconnectVnc(clientId) {
+  const socket = vncSockets.get(clientId);
+  vncSockets.delete(clientId);
   if (socket && !socket.destroyed) socket.destroy();
+}
+
+function disconnectAllVnc() {
+  for (const clientId of vncSockets.keys()) disconnectVnc(clientId);
 }
 
 async function main() {
@@ -178,10 +184,7 @@ async function main() {
   });
 
   websocket.on("message", async (raw, isBinary) => {
-    if (isBinary) {
-      if (vncSocket && !vncSocket.destroyed) vncSocket.write(raw);
-      return;
-    }
+    if (isBinary) return;
     let message;
     try { message = JSON.parse(raw.toString()); } catch { return; }
     if (message.type === "vm.auth.failed") {
@@ -191,15 +194,26 @@ async function main() {
     }
     if (message.type === "vm.desktop.start") {
       try {
-        await connectVnc(websocket);
-        console.log("Interactive VM VNC bridge attached");
+        await connectVnc(websocket, String(message.clientId));
+        console.log(`Interactive VM VNC bridge attached for ${message.clientId}`);
       } catch (error) {
-        console.error("Failed to connect VNC bridge:", error instanceof Error ? error.message : error);
+        console.error(`Failed to connect VNC bridge for ${message.clientId}:`, error instanceof Error ? error.message : error);
+      }
+      return;
+    }
+    if (message.type === "vm.desktop.input") {
+      const clientId = String(message.clientId ?? "");
+      const socket = vncSockets.get(clientId);
+      if (!socket || socket.destroyed || typeof message.data !== "string") return;
+      try {
+        socket.write(Buffer.from(message.data, "base64"));
+      } catch (error) {
+        console.error(`Failed to forward VNC input for ${clientId}:`, error instanceof Error ? error.message : error);
       }
       return;
     }
     if (message.type === "vm.desktop.stop") {
-      disconnectVnc();
+      disconnectVnc(String(message.clientId ?? ""));
       return;
     }
     if (message.type === "vm.command") {
@@ -220,13 +234,13 @@ async function main() {
 
   await new Promise((resolve) => websocket.on("close", resolve));
   clearInterval(heartbeat);
-  disconnectVnc();
+  disconnectAllVnc();
 }
 
 async function shutdown() {
   if (stopping) return;
   stopping = true;
-  disconnectVnc();
+  disconnectAllVnc();
   for (const child of [...processes].reverse()) {
     if (!child.killed) child.kill("SIGTERM");
   }
