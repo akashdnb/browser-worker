@@ -104,8 +104,8 @@ jobs:
               echo "::warning::Run $run_id profile artifact did not contain the expected archive"
               return 1
             fi
-            if ! tar -tzf "$archive" | grep -Fxq "browser-worker-profile/Local State" ||
-               ! tar -tzf "$archive" | grep -Fxq "browser-worker-profile/Default/Preferences"; then
+            if ! tar -tzf "$archive" | grep -Fx "browser-worker-profile/Local State" > /dev/null ||
+               ! tar -tzf "$archive" | grep -Fx "browser-worker-profile/Default/Preferences" > /dev/null; then
               echo "::warning::Run $run_id profile archive is missing Chromium profile metadata"
               return 1
             fi
@@ -283,8 +283,8 @@ jobs:
             "$profile_dir/GrShaderCache"
 
           tar -czf browser-worker-profile.tar.gz -C "$RUNNER_TEMP" browser-worker-profile
-          tar -tzf browser-worker-profile.tar.gz | grep -Fxq "browser-worker-profile/Local State"
-          tar -tzf browser-worker-profile.tar.gz | grep -Fxq "browser-worker-profile/Default/Preferences"
+          tar -tzf browser-worker-profile.tar.gz | grep -Fx "browser-worker-profile/Local State" > /dev/null
+          tar -tzf browser-worker-profile.tar.gz | grep -Fx "browser-worker-profile/Default/Preferences" > /dev/null
           ls -lh browser-worker-profile.tar.gz
 
       - name: Upload browser profile
