@@ -118,4 +118,32 @@ jobs:
           vm_pid=$!
           trap 'kill "$vm_pid" 2>/dev/null || true' EXIT
 
+          for attempt in $(seq 1 60); do
+            if grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+              echo "Interactive VM relay is connected"
+              break
+            fi
+            if ! kill -0 "$vm_pid" 2>/dev/null; then
+              echo "::error::Interactive VM relay exited during startup"
+              cat "$RUNNER_TEMP/interactive-vm.log"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if ! grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+            echo "::error::Interactive VM relay did not connect to utils within 60 seconds"
+            cat "$RUNNER_TEMP/interactive-vm.log"
+            exit 1
+          fi
+
           node src/worker.js
+
+      - name: Upload browser storage state
+        if: ${{ always() && hashFiles('browser-worker-state/storage-state.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-worker-state
+          path: browser-worker-state/storage-state.json
+          retention-days: 90
+          overwrite: true
