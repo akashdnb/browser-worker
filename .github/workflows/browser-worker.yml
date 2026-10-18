@@ -41,7 +41,7 @@ jobs:
       - name: Set up interactive desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc openbox
+          sudo apt-get install -y xvfb x11vnc openbox xdotool
 
       - name: Restore previous browser profile
         env:
