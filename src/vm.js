@@ -161,6 +161,7 @@ async function startDesktop() {
     "--disable-dev-shm-usage",
     "--disable-gpu",
     "--start-maximized",
+    "--restore-last-session",
     "--no-first-run",
     "--no-default-browser-check",
     "--password-store=basic",
