@@ -126,6 +126,7 @@ jobs:
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
           PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ runner.temp }}/browser-worker-profile
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
+          PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
           WORKER_MAX_SECONDS: "19800"
           WORKER_RENEWAL_LEAD_SECONDS: "900"
           GITHUB_TOKEN: ${{ github.token }}
