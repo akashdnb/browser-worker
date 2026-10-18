@@ -58,9 +58,10 @@ async function waitForPort(host, port, timeoutMs = 20_000) {
   throw new Error(`Timed out waiting for ${host}:${port}`);
 }
 
-function startDesktop() {
+async function startDesktop() {
   const env = { ...process.env, DISPLAY: display };
   start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env);
+  await sleep(1000);
   start(["openbox"], env);
   start([
     chromium,
@@ -128,7 +129,7 @@ function disconnectVnc() {
 }
 
 async function main() {
-  startDesktop();
+  await startDesktop();
   await waitForPort("127.0.0.1", vncPort);
 
   const uri = `${utilsUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
