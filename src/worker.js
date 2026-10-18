@@ -9,6 +9,10 @@ const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL;
 const workerToken = process.env.UTILS_BROWSER_WORKER_TOKEN;
 const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://localhost:8931/mcp";
 const maxSeconds = Number.parseInt(process.env.WORKER_MAX_SECONDS ?? "20400", 10);
+const renewalLeadSeconds = Number.parseInt(process.env.WORKER_RENEWAL_LEAD_SECONDS ?? "900", 10);
+const githubToken = process.env.GITHUB_TOKEN;
+const githubRepository = process.env.GITHUB_REPOSITORY;
+const githubRef = process.env.GITHUB_REF_NAME ?? "main";
 const stateFile = process.env.BROWSER_WORKER_STATE_FILE ?? "browser-worker-state/storage-state.json";
 const initialStorageStateJson = process.env.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON;
 
@@ -18,10 +22,19 @@ if (!gatewayUrl || !workerToken) {
 if (!Number.isFinite(maxSeconds) || maxSeconds < 60 || maxSeconds > 21000) {
   throw new Error("WORKER_MAX_SECONDS must be between 60 and 21000");
 }
+if (!Number.isFinite(renewalLeadSeconds) || renewalLeadSeconds < 60 || renewalLeadSeconds >= maxSeconds) {
+  throw new Error("WORKER_RENEWAL_LEAD_SECONDS must be at least 60 and less than WORKER_MAX_SECONDS");
+}
+if (!githubToken || !githubRepository) {
+  throw new Error("GITHUB_TOKEN and GITHUB_REPOSITORY are required for worker self-renewal");
+}
 
 const workerId = randomUUID();
 let shuttingDown = false;
 let reconnectTimer;
+let renewalTimer;
+let renewalRetryTimer;
+let renewalTriggered = false;
 let gateway;
 let gatewayKeepaliveTimer;
 let gatewayPongAt = 0;
@@ -230,6 +243,43 @@ async function saveStorageState() {
   }
 }
 
+async function triggerReplacementWorkflow() {
+  if (renewalTriggered || shuttingDown) return;
+  renewalTriggered = true;
+  const url = `https://api.github.com/repos/${githubRepository}/actions/workflows/browser-worker.yml/dispatches`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${githubToken}`,
+        "x-github-api-version": "2022-11-28",
+        "content-type": "application/json",
+        "user-agent": "signalai-browser-worker",
+      },
+      body: JSON.stringify({ ref: githubRef }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`GitHub workflow dispatch failed (${response.status}): ${body || "empty response"}`);
+    }
+    console.log(`Triggered replacement Browser Worker workflow for ${githubRepository}@${githubRef}`);
+  } catch (error) {
+    renewalTriggered = false;
+    console.error("Failed to trigger replacement Browser Worker workflow:", error instanceof Error ? error.message : error);
+    renewalRetryTimer = setTimeout(() => void triggerReplacementWorkflow(), 60_000);
+  }
+}
+
+function scheduleReplacement() {
+  const delayMs = Math.max(60_000, (maxSeconds - renewalLeadSeconds) * 1000);
+  renewalTimer = setTimeout(() => {
+    console.log(`Worker renewal window reached; starting replacement ${renewalLeadSeconds}s before expiry`);
+    void triggerReplacementWorkflow();
+  }, delayMs);
+  console.log(`Scheduled replacement in ${Math.round(delayMs / 60_000)} minutes`);
+}
+
 function stopGatewayKeepalive() {
   if (gatewayKeepaliveTimer) {
     clearInterval(gatewayKeepaliveTimer);
@@ -331,6 +381,11 @@ function connectGateway() {
   gateway.on("close", (code, reason) => {
     stopGatewayKeepalive();
     console.warn(`Gateway disconnected (${code}): ${reason.toString()}`);
+    if (code === 1013 && reason.toString() === "Worker replaced") {
+      console.log("Replacement worker connected; shutting down this worker");
+      void shutdown();
+      return;
+    }
     if (!shuttingDown) reconnectTimer = setTimeout(connectGateway, 1500);
   });
 
@@ -341,6 +396,8 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   clearTimeout(reconnectTimer);
+  clearTimeout(renewalTimer);
+  clearTimeout(renewalRetryTimer);
   stopGatewayKeepalive();
   await saveStorageState();
   if (gateway?.readyState === WebSocket.OPEN) {
@@ -362,6 +419,7 @@ await waitForMcp();
 await ensureUpstreamInitialized();
 await restoreStorageState();
 connectGateway();
+scheduleReplacement();
 console.log(`Worker ${workerId} started; lifetime ${maxSeconds}s`);
 setTimeout(() => {
   console.log("Worker lifecycle limit reached; stopping for scheduled replacement");
