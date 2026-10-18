@@ -10,6 +10,7 @@ Disposable Chromium worker for the private `akashdnb/utils` Browser MCP gateway.
 - `utils` remains the only agent-facing Browser MCP endpoint. The worker has no public inbound listener.
 - The job is capped below six hours. A six-hour scheduled run is only a safety net; the worker normally renews itself 15 minutes before its limit, passing the current run ID so its latest Chromium profile is restored.
 - Delayed schedule/push starts are skipped if a worker is already active, preventing an older successful profile artifact from overwriting the live profile.
+- Chromium is launched with an explicit `--user-data-dir=<path>` and the worker verifies that `Local State` and `Default/Preferences` are written there before announcing readiness. Profile restore/archive steps reject empty snapshots instead of silently replacing browser state with a fresh profile.
 
 ## Repository setup
 
