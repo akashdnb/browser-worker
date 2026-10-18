@@ -98,9 +98,8 @@ async function startDesktop() {
   const env = { ...process.env, DISPLAY: display };
   await cleanProfileLocks();
 
-  // On a VM relay reconnect the previous desktop may still be exiting. Reuse
-  // an already running local service when possible rather than spawning a
-  // second Chromium against the same user profile or racing the CDP port.
+  // Reuse Chromium only when its HTTP debugging endpoint responds. A TCP
+  // listener can survive a failed browser startup, so discard stale processes.
   try {
     const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
       signal: AbortSignal.timeout(1000),
@@ -110,9 +109,16 @@ async function startDesktop() {
       await waitForPort("127.0.0.1", vncPort, 10_000).catch(() => {});
       return;
     }
+    console.warn(`Stale CDP HTTP listener returned ${response.status}; restarting Chromium`);
   } catch {
-    // No existing browser; start a fresh desktop below.
+    // No usable browser; start a fresh desktop below.
   }
+
+  // On a reconnect, Chromium may have died while leaving lock files or a
+  // stale process. Clear those before starting another instance on the profile.
+  await runCommand("pkill -TERM -f '[c]hromium.*remote-debugging-port' || true", 3);
+  await sleep(500);
+  await cleanProfileLocks();
 
   start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env);
   await sleep(1000);
