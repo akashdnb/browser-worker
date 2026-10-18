@@ -92,17 +92,40 @@ jobs:
 
           restore_run() {
             local run_id="$1"
+            local artifact_dir="browser-worker-state/profile-artifact"
+            local archive="$artifact_dir/browser-worker-profile.tar.gz"
+            local extracted="$RUNNER_TEMP/browser-worker-profile-restore"
             echo "Restoring browser profile from workflow run $run_id"
-            if gh run download "$run_id" -n browser-worker-profile -D browser-worker-state/profile-artifact 2>/dev/null; then
-              if [ -f browser-worker-state/profile-artifact/browser-worker-profile.tar.gz ]; then
-                rm -rf "$RUNNER_TEMP/browser-worker-profile"
-                mkdir -p "$RUNNER_TEMP/browser-worker-profile"
-                tar -xzf browser-worker-state/profile-artifact/browser-worker-profile.tar.gz -C "$RUNNER_TEMP"
-                echo "Restored full Chromium profile from workflow run $run_id"
-                return 0
-              fi
+            rm -rf "$artifact_dir" "$extracted"
+            if ! gh run download "$run_id" -n browser-worker-profile -D "$artifact_dir" 2>/dev/null; then
+              return 1
             fi
-            return 1
+            if [ ! -f "$archive" ]; then
+              echo "::warning::Run $run_id profile artifact did not contain the expected archive"
+              return 1
+            fi
+            if ! tar -tzf "$archive" | grep -Fx "browser-worker-profile/Local State" > /dev/null ||
+               ! tar -tzf "$archive" | grep -Fx "browser-worker-profile/Default/Preferences" > /dev/null; then
+              echo "::warning::Run $run_id profile archive is missing Chromium profile metadata"
+              return 1
+            fi
+            mkdir -p "$extracted"
+            if ! tar -xzf "$archive" -C "$extracted"; then
+              echo "::warning::Run $run_id profile archive could not be extracted"
+              rm -rf "$extracted"
+              return 1
+            fi
+            if [ ! -s "$extracted/browser-worker-profile/Local State" ] ||
+               [ ! -s "$extracted/browser-worker-profile/Default/Preferences" ]; then
+              echo "::warning::Run $run_id profile archive extracted without required Chromium metadata"
+              rm -rf "$extracted"
+              return 1
+            fi
+            rm -rf "$RUNNER_TEMP/browser-worker-profile"
+            mv "$extracted/browser-worker-profile" "$RUNNER_TEMP/browser-worker-profile"
+            rm -rf "$extracted"
+            echo "Restored full Chromium profile from workflow run $run_id"
+            return 0
           }
 
           restore_state() {
@@ -133,14 +156,23 @@ jobs:
               exit 1
             fi
           else
-            latest_run_id="$(gh run list --workflow browser-worker.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
-            if [ -n "$latest_run_id" ]; then
-              if ! restore_run "$latest_run_id"; then
-                echo "No previous browser profile artifact found; starting with a fresh profile"
+            previous_run_ids="$(gh run list --workflow browser-worker.yml --status success --limit 20 --json databaseId --jq '.[].databaseId')"
+            if [ -n "$previous_run_ids" ]; then
+              restored=false
+              while IFS= read -r previous_run_id; do
+                [ -n "$previous_run_id" ] || continue
+                if restore_run "$previous_run_id"; then
+                  restore_state "$previous_run_id"
+                  restored=true
+                  break
+                fi
+              done <<< "$previous_run_ids"
+              if [ "$restored" != "true" ]; then
+                echo "::error::Previous successful runs exist, but none contains a valid Chromium profile archive. Refusing to start a fresh profile and overwrite browser state."
+                exit 1
               fi
-              restore_state "$latest_run_id"
             else
-              echo "No previous successful worker run found; starting fresh"
+              echo "No previous successful worker run exists; starting the first Chromium profile"
             fi
           fi
 
@@ -226,12 +258,17 @@ jobs:
         run: |
           profile_dir="$RUNNER_TEMP/browser-worker-profile"
           if [ ! -d "$profile_dir" ]; then
-            echo "No browser profile directory to archive"
-            exit 0
+            echo "::error::Chromium profile directory is missing; refusing to publish an empty profile artifact"
+            exit 1
+          fi
+          if [ ! -s "$profile_dir/Local State" ] || [ ! -s "$profile_dir/Default/Preferences" ]; then
+            echo "::error::Chromium did not populate the configured profile directory ($profile_dir). Check the --user-data-dir argument; refusing to publish a blank snapshot."
+            find "$profile_dir" -maxdepth 2 -type f -printf '%P (%s bytes)\n' | head -n 50
+            exit 1
           fi
 
-          # Remove process-specific locks and disposable caches before handing
-          # the persistent Chromium profile to the next GitHub Actions runner.
+          # Remove process-specific locks and disposable caches only. Keep
+          # cookies, History, Local Storage, IndexedDB, and Service Worker data.
           find "$profile_dir" -maxdepth 1 -type f \( -name 'SingletonLock' -o -name 'SingletonCookie' -o -name 'SingletonSocket' -o -name 'DevToolsActivePort' \) -delete
           rm -rf \
             "$profile_dir/Default/Cache" \
@@ -239,7 +276,6 @@ jobs:
             "$profile_dir/Default/GPUCache" \
             "$profile_dir/Default/GrShaderCache" \
             "$profile_dir/Default/ShaderCache" \
-            "$profile_dir/Default/Service Worker/CacheStorage" \
             "$profile_dir/Crashpad" \
             "$profile_dir/Crash Reports" \
             "$profile_dir/BrowserMetrics" \
@@ -247,6 +283,8 @@ jobs:
             "$profile_dir/GrShaderCache"
 
           tar -czf browser-worker-profile.tar.gz -C "$RUNNER_TEMP" browser-worker-profile
+          tar -tzf browser-worker-profile.tar.gz | grep -Fx "browser-worker-profile/Local State" > /dev/null
+          tar -tzf browser-worker-profile.tar.gz | grep -Fx "browser-worker-profile/Default/Preferences" > /dev/null
           ls -lh browser-worker-profile.tar.gz
 
       - name: Upload browser profile

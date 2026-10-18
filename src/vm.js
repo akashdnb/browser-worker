@@ -85,6 +85,33 @@ async function probeCdp(timeoutMs = 60_000) {
   return false;
 }
 
+async function waitForPersistentProfile(timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  const localStatePath = `${userDataDir}/Local State`;
+  const preferencesPath = `${userDataDir}/Default/Preferences`;
+
+  while (Date.now() < deadline) {
+    try {
+      const [localState, preferences] = await Promise.all([
+        stat(localStatePath),
+        stat(preferencesPath),
+      ]);
+      if (localState.isFile() && localState.size > 0 &&
+          preferences.isFile() && preferences.size > 0) {
+        console.log(`Chromium profile persistence verified at ${userDataDir}`);
+        return;
+      }
+    } catch {
+      // Chromium creates profile metadata shortly after CDP becomes available.
+    }
+    await sleep(500);
+  }
+
+  throw new Error(
+    `Chromium became available but did not create its persistent profile at ${userDataDir}; refusing to expose a browser session that cannot be archived.`
+  );
+}
+
 async function cleanProfileLocks() {
   await Promise.all([
     rm(`${userDataDir}/SingletonLock`, { force: true }),
@@ -105,9 +132,14 @@ async function startDesktop() {
       signal: AbortSignal.timeout(1000),
     });
     if (response.ok) {
-      console.log(`Reusing existing Chromium CDP listener on 127.0.0.1:${cdpPort}`);
-      await waitForPort("127.0.0.1", vncPort, 10_000).catch(() => {});
-      return;
+      try {
+        await waitForPersistentProfile(2_000);
+        console.log(`Reusing existing Chromium CDP listener on 127.0.0.1:${cdpPort}`);
+        await waitForPort("127.0.0.1", vncPort, 10_000).catch(() => {});
+        return;
+      } catch (error) {
+        console.warn(`Existing Chromium is not using the configured profile at ${userDataDir}: ${error instanceof Error ? error.message : String(error)}; restarting it`);
+      }
     }
     console.warn(`Stale CDP HTTP listener returned ${response.status}; restarting Chromium`);
   } catch {
@@ -135,7 +167,7 @@ async function startDesktop() {
     "--remote-debugging-address=127.0.0.1",
     `--remote-debugging-port=${cdpPort}`,
     "--remote-allow-origins=*",
-    "--user-data-dir", userDataDir,
+    `--user-data-dir=${userDataDir}`,
     "about:blank",
   ], env);
   start([
@@ -164,6 +196,16 @@ async function startDesktop() {
       if (!child.killed) child.kill("SIGTERM");
     }
     throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
+  }
+
+  try {
+    await waitForPersistentProfile();
+  } catch (error) {
+    const browserProcesses = processes.filter((child) => (child.spawnargs?.[0] ?? "") === chromium);
+    for (const child of browserProcesses) {
+      if (!child.killed) child.kill("SIGTERM");
+    }
+    throw error;
   }
 }
 
