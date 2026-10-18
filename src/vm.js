@@ -8,7 +8,9 @@ const token = process.env.UTILS_BROWSER_WORKER_TOKEN;
 const workerId = process.env.VM_WORKER_ID ?? `github-${process.env.GITHUB_RUN_ID ?? process.pid}`;
 const display = process.env.DISPLAY ?? ":99";
 const vncPort = Number.parseInt(process.env.VM_VNC_PORT ?? "5900", 10);
+const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10);
 const chromium = process.env.CHROMIUM_BIN;
+const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
 
 if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
 if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
@@ -70,7 +72,12 @@ async function startDesktop() {
     "--disable-dev-shm-usage",
     "--disable-gpu",
     "--start-maximized",
-    "--user-data-dir=/tmp/interactive-vm-chromium",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--password-store=basic",
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port", String(cdpPort),
+    "--user-data-dir", userDataDir,
     "about:blank",
   ], env);
   // Keep the Xvfb/x11vnc combination interactive. These flags are important
@@ -97,7 +104,7 @@ async function startDesktop() {
 async function handleCommand(payload) {
   const action = payload?.action;
   if (action === "status") {
-    return { ok: true, workerId, display, browser: chromium, platform: process.platform };
+    return { ok: true, workerId, display, browser: chromium, platform: process.platform, userDataDir, cdpPort };
   }
   if (action === "exec") {
     const command = payload?.command;
@@ -159,6 +166,7 @@ function disconnectVnc() {
 async function main() {
   await startDesktop();
   await waitForPort("127.0.0.1", vncPort);
+  await waitForPort("127.0.0.1", cdpPort);
 
   const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
   const websocket = new WebSocket(uri, { maxPayload: 16 * 1024 * 1024, handshakeTimeout: 15_000 });
@@ -166,6 +174,7 @@ async function main() {
   websocket.on("open", () => {
     websocket.send(JSON.stringify({ type: "vm.hello", token, workerId, capabilities: ["desktop", "browser", "terminal", "files"] }));
     console.log(`Interactive VM connected to utils as ${workerId}`);
+    console.log(`Shared Chromium ready for MCP over CDP on 127.0.0.1:${cdpPort} using ${userDataDir}`);
   });
 
   websocket.on("message", async (raw, isBinary) => {
