@@ -132,19 +132,28 @@ async function handleCommand(payload) {
 }
 
 async function connectVnc(websocket) {
-  if (vncSocket && !vncSocket.destroyed) return;
+  // Each browser WebSocket needs a fresh VNC protocol session. Reusing an
+  // existing TCP connection after a page refresh leaves noVNC out of sync:
+  // it receives framebuffer bytes from the previous session where it expects
+  // the new RFB handshake, producing "Unexpected server message" errors and
+  // making the desktop look connected while ignoring all input.
+  disconnectVnc();
   await waitForPort("127.0.0.1", vncPort);
-  vncSocket = net.createConnection({ host: "127.0.0.1", port: vncPort });
-  vncSocket.on("data", (chunk) => {
-    if (websocket.readyState === WebSocket.OPEN) websocket.send(chunk);
+  const socket = net.createConnection({ host: "127.0.0.1", port: vncPort });
+  vncSocket = socket;
+  socket.on("data", (chunk) => {
+    if (websocket.readyState === WebSocket.OPEN && vncSocket === socket) websocket.send(chunk);
   });
-  vncSocket.on("error", (error) => console.error("VNC socket error:", error.message));
-  vncSocket.on("close", () => { vncSocket = undefined; });
+  socket.on("error", (error) => console.error("VNC socket error:", error.message));
+  socket.on("close", () => {
+    if (vncSocket === socket) vncSocket = undefined;
+  });
 }
 
 function disconnectVnc() {
-  if (vncSocket && !vncSocket.destroyed) vncSocket.destroy();
+  const socket = vncSocket;
   vncSocket = undefined;
+  if (socket && !socket.destroyed) socket.destroy();
 }
 
 async function main() {
