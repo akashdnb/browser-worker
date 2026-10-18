@@ -132,9 +132,14 @@ async function startDesktop() {
       signal: AbortSignal.timeout(1000),
     });
     if (response.ok) {
-      console.log(`Reusing existing Chromium CDP listener on 127.0.0.1:${cdpPort}`);
-      await waitForPort("127.0.0.1", vncPort, 10_000).catch(() => {});
-      return;
+      try {
+        await waitForPersistentProfile(2_000);
+        console.log(`Reusing existing Chromium CDP listener on 127.0.0.1:${cdpPort}`);
+        await waitForPort("127.0.0.1", vncPort, 10_000).catch(() => {});
+        return;
+      } catch (error) {
+        console.warn(`Existing Chromium is not using the configured profile at ${userDataDir}: ${error instanceof Error ? error.message : String(error)}; restarting it`);
+      }
     }
     console.warn(`Stale CDP HTTP listener returned ${response.status}; restarting Chromium`);
   } catch {
