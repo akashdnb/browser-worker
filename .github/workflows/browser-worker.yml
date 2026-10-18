@@ -14,9 +14,10 @@ on:
     # Safety-net restart; the active worker normally renews itself 15 minutes before expiry.
     - cron: "17 */6 * * *"
 
-# Pushes are deployments of the worker code and should supersede older push
-# runs. Self-renewal/manual runs use unique groups so the handoff can overlap
-# the current worker long enough to restore its browser profile artifact.
+# Self-renewal handoffs carry an explicit source run ID so the active profile
+# is archived/restored safely. A serialized preflight skips delayed schedule,
+# push, or manual starts that would otherwise replace an active worker with a
+# stale last-successful profile snapshot.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
