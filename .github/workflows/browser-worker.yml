@@ -13,10 +13,6 @@ permissions:
   contents: read
   actions: write
 
-concurrency:
-  group: browser-worker-singleton
-  cancel-in-progress: false
-
 jobs:
   browser:
     runs-on: ubuntu-latest
