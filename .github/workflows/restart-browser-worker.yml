@@ -11,8 +11,43 @@ jobs:
   restart:
     runs-on: ubuntu-latest
     steps:
-      - name: Start a fresh browser worker
+      - name: Archive the active profile before restarting
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        run: gh workflow run browser-worker.yml --repo "$REPO"
+        run: |
+          active_runs="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId')"
+          active_count="$(printf '%s\n' "$active_runs" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+          if [ "$active_count" -gt 1 ]; then
+            echo "::error::Found $active_count active Browser Worker runs. Refusing to choose a profile automatically; stop the duplicate run after confirming which run owns the latest session."
+            printf '%s\n' "$active_runs"
+            exit 1
+          fi
+
+          if [ "$active_count" -eq 1 ]; then
+            source_run_id="$(printf '%s\n' "$active_runs" | head -n 1)"
+            echo "Cancelling active worker $source_run_id so its always() steps can archive the current Chromium profile."
+            gh run cancel "$source_run_id" --repo "$REPO" || true
+
+            completed=false
+            for attempt in $(seq 1 90); do
+              status="$(gh run view "$source_run_id" --repo "$REPO" --json status --jq '.status')"
+              if [ "$status" = "completed" ]; then
+                completed=true
+                break
+              fi
+              sleep 5
+            done
+
+            if [ "$completed" != "true" ]; then
+              echo "::error::Worker run $source_run_id did not finish archiving within 7.5 minutes; not starting an empty profile."
+              exit 1
+            fi
+
+            echo "Starting replacement worker with profile from run $source_run_id"
+            gh workflow run browser-worker.yml --repo "$REPO" --ref main -f source_run_id="$source_run_id"
+          else
+            echo "No worker is active; starting from the latest successful archived profile."
+            gh workflow run browser-worker.yml --repo "$REPO" --ref main
+          fi
