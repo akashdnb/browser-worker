@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: "Previous worker run whose browser state artifact must be restored"
+        description: "Previous worker run whose browser profile must be restored"
         required: false
         type: string
   push:
@@ -16,7 +16,7 @@ on:
 
 # Pushes are deployments of the worker code and should supersede older push
 # runs. Self-renewal/manual runs use unique groups so the handoff can overlap
-# the current worker long enough to restore its state artifact.
+# the current worker long enough to restore its browser profile artifact.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
@@ -43,40 +43,62 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb x11vnc openbox
 
-      - name: Restore previous browser storage state
+      - name: Restore previous browser profile
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
-          mkdir -p browser-worker-state
+          mkdir -p browser-worker-state "$RUNNER_TEMP/browser-worker-profile"
+
+          restore_run() {
+            local run_id="$1"
+            echo "Restoring browser profile from workflow run $run_id"
+            if gh run download "$run_id" -n browser-worker-profile -D browser-worker-state/profile-artifact 2>/dev/null; then
+              if [ -f browser-worker-state/profile-artifact/browser-worker-profile.tar.gz ]; then
+                rm -rf "$RUNNER_TEMP/browser-worker-profile"
+                mkdir -p "$RUNNER_TEMP/browser-worker-profile"
+                tar -xzf browser-worker-state/profile-artifact/browser-worker-profile.tar.gz -C "$RUNNER_TEMP"
+                echo "Restored full Chromium profile from workflow run $run_id"
+                return 0
+              fi
+            fi
+            return 1
+          }
+
+          restore_state() {
+            local run_id="$1"
+            gh run download "$run_id" -n browser-worker-state -D browser-worker-state 2>/dev/null || true
+            if [ -f browser-worker-state/storage-state.json ]; then
+              echo "Restored Playwright storage state from workflow run $run_id"
+            fi
+          }
+
           if [ -n "$SOURCE_RUN_ID" ]; then
-            echo "Waiting for browser state artifact from source workflow run $SOURCE_RUN_ID"
+            echo "Waiting for browser artifacts from source workflow run $SOURCE_RUN_ID"
             restored=false
             for attempt in $(seq 1 80); do
-              if gh run download "$SOURCE_RUN_ID" -n browser-worker-state -D browser-worker-state 2>/dev/null; then
-                if [ -f browser-worker-state/storage-state.json ]; then
-                  restored=true
-                  echo "Restored browser state from source workflow run $SOURCE_RUN_ID"
-                  break
-                fi
+              if restore_run "$SOURCE_RUN_ID"; then
+                restore_state "$SOURCE_RUN_ID"
+                restored=true
+                break
               fi
-              echo "Source state artifact not available yet (attempt $attempt/80); waiting 15s"
-              rm -f browser-worker-state/storage-state.json
+              echo "Source browser profile artifact not available yet (attempt $attempt/80); waiting 15s"
+              rm -rf "$RUNNER_TEMP/browser-worker-profile"
+              mkdir -p "$RUNNER_TEMP/browser-worker-profile"
+              rm -rf browser-worker-state/profile-artifact
               sleep 15
             done
             if [ "$restored" != "true" ]; then
-              echo "::error::Timed out waiting for browser state artifact from source workflow run $SOURCE_RUN_ID"
+              echo "::error::Timed out waiting for browser profile artifact from source workflow run $SOURCE_RUN_ID"
               exit 1
             fi
           else
             latest_run_id="$(gh run list --workflow browser-worker.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
             if [ -n "$latest_run_id" ]; then
-              echo "Restoring browser state from workflow run $latest_run_id"
-              if gh run download "$latest_run_id" -n browser-worker-state -D browser-worker-state; then
-                test -f browser-worker-state/storage-state.json || rm -f browser-worker-state/storage-state.json
-              else
-                echo "No previous browser state artifact found; starting fresh"
+              if ! restore_run "$latest_run_id"; then
+                echo "No previous browser profile artifact found; starting with a fresh profile"
               fi
+              restore_state "$latest_run_id"
             else
               echo "No previous successful worker run found; starting fresh"
             fi
@@ -93,7 +115,7 @@ jobs:
           chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
           test -n "$chromium_bin"
           echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
-          echo "Using interactive Chromium at $chromium_bin"
+          echo "Using shared interactive Chromium at $chromium_bin"
 
       - name: Run browser worker and interactive desktop
         env:
@@ -103,10 +125,12 @@ jobs:
           BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
           PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ runner.temp }}/browser-worker-profile
+          PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           WORKER_MAX_SECONDS: "19800"
           WORKER_RENEWAL_LEAD_SECONDS: "900"
           GITHUB_TOKEN: ${{ github.token }}
           VM_WORKER_ID: github-${{ github.run_id }}
+          VM_CHROMIUM_DEBUG_PORT: "9222"
           DISPLAY: ":99"
         run: |
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
@@ -116,7 +140,7 @@ jobs:
 
           node src/vm.js > "$RUNNER_TEMP/interactive-vm.log" 2>&1 &
           vm_pid=$!
-          trap 'kill "$vm_pid" 2>/dev/null || true' EXIT
+          trap 'kill "$vm_pid" 2>/dev/null || true; wait "$vm_pid" 2>/dev/null || true' EXIT
 
           for attempt in $(seq 1 60); do
             if grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
@@ -131,13 +155,50 @@ jobs:
             sleep 1
           done
 
-          if ! grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+          if ! grep -q "Interactive VM relay is connected" "$RUNNER_TEMP/interactive-vm.log" && ! grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
             echo "::error::Interactive VM relay did not connect to utils within 60 seconds"
             cat "$RUNNER_TEMP/interactive-vm.log"
             exit 1
           fi
 
           node src/worker.js
+
+      - name: Prepare browser profile artifact
+        if: ${{ always() }}
+        run: |
+          profile_dir="$RUNNER_TEMP/browser-worker-profile"
+          if [ ! -d "$profile_dir" ]; then
+            echo "No browser profile directory to archive"
+            exit 0
+          fi
+
+          # Remove process-specific locks and disposable caches before handing
+          # the persistent Chromium profile to the next GitHub Actions runner.
+          find "$profile_dir" -maxdepth 1 -type f \( -name 'SingletonLock' -o -name 'SingletonCookie' -o -name 'SingletonSocket' -o -name 'DevToolsActivePort' \) -delete
+          rm -rf \
+            "$profile_dir/Default/Cache" \
+            "$profile_dir/Default/Code Cache" \
+            "$profile_dir/Default/GPUCache" \
+            "$profile_dir/Default/GrShaderCache" \
+            "$profile_dir/Default/ShaderCache" \
+            "$profile_dir/Default/Service Worker/CacheStorage" \
+            "$profile_dir/Crashpad" \
+            "$profile_dir/Crash Reports" \
+            "$profile_dir/BrowserMetrics" \
+            "$profile_dir/GraphiteDawnCache" \
+            "$profile_dir/GrShaderCache"
+
+          tar -czf browser-worker-profile.tar.gz -C "$RUNNER_TEMP" browser-worker-profile
+          ls -lh browser-worker-profile.tar.gz
+
+      - name: Upload browser profile
+        if: ${{ always() && hashFiles('browser-worker-profile.tar.gz') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-worker-profile
+          path: browser-worker-profile.tar.gz
+          retention-days: 90
+          overwrite: true
 
       - name: Upload browser storage state
         if: ${{ always() && hashFiles('browser-worker-state/storage-state.json') != '' }}
