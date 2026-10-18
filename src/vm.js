@@ -261,7 +261,15 @@ async function connectVnc(websocket, clientId) {
   const socket = net.createConnection({ host: "127.0.0.1", port: vncPort });
   vncSockets.set(clientId, socket);
   socket.on("data", (chunk) => {
-    if (websocket.readyState === WebSocket.OPEN && vncSockets.get(clientId) === socket) websocket.send(chunk);
+    if (websocket.readyState === WebSocket.OPEN && vncSockets.get(clientId) === socket) {
+      // Tag every VNC byte chunk so the relay can deliver it only to the
+      // browser client whose independent RFB stream produced it.
+      websocket.send(JSON.stringify({
+        type: "vm.desktop.frame",
+        clientId,
+        data: chunk.toString("base64"),
+      }));
+    }
   });
   socket.on("error", (error) => console.error(`VNC socket error (${clientId}):`, error.message));
   socket.on("close", () => {
