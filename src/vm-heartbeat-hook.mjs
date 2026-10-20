@@ -72,7 +72,7 @@ if [[ -d "$extension_dir" ]]; then args+=("--load-extension=$extension_dir"); fi
 "$real_bin" "\${args[@]}" &
 chrome_pid=$!
 bootstrap_status=0
-if [[ -f "$runner" && -d "$extension_dir" ]]; then node "$runner" || bootstrap_status=$?; fi
+if [[ -f "$runner" && -d "$extension_dir" ]]; then env -u NODE_OPTIONS node "$runner" || bootstrap_status=$?; fi
 if (( bootstrap_status != 0 )); then
   echo "BrowserMCP bootstrap failed; stopping Chromium" >&2
   kill "$chrome_pid" 2>/dev/null || true
