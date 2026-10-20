@@ -1,5 +1,46 @@
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+
 function formBody(values) {
   return new URLSearchParams(values).toString();
+}
+
+async function requestBootstrapPayload({ baseUrl, workerToken, workerId }) {
+  const resource = `${baseUrl}/browser-mcp`;
+  const response = await fetch(`${baseUrl}/oauth/token`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${workerToken}`,
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json",
+    },
+    body: formBody({
+      grant_type: "urn:render:browser-worker",
+      resource,
+      worker_id: workerId || "browser-worker-vm",
+    }),
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`BrowserMCP VM bootstrap failed with HTTP ${response.status}: ${text.slice(0, 500)}`);
+  const payload = JSON.parse(text);
+  if (typeof payload.access_token !== "string" || !payload.access_token) throw new Error("BrowserMCP VM bootstrap did not return an access token");
+  if (typeof payload.extension_bundle_base64 !== "string" || payload.extension_bundle_format !== "tar.gz") {
+    throw new Error("BrowserMCP VM bootstrap did not return an extension bundle");
+  }
+  return payload;
+}
+
+export async function prepareBrowserMcpExtension({ baseUrl, workerToken, workerId, extensionDir }) {
+  if (!baseUrl || !workerToken) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required for BrowserMCP VM bootstrap");
+  const payload = await requestBootstrapPayload({ baseUrl: baseUrl.replace(/\/$/, ""), workerToken, workerId });
+  await rm(extensionDir, { recursive: true, force: true });
+  await mkdir(extensionDir, { recursive: true });
+  const archivePath = `${extensionDir}.tar.gz`;
+  await writeFile(archivePath, Buffer.from(payload.extension_bundle_base64, "base64"), { mode: 0o600 });
+  const extraction = spawnSync("tar", ["-xzf", archivePath, "-C", extensionDir, "--strip-components=1"], { encoding: "utf8" });
+  await rm(archivePath, { force: true });
+  if (extraction.status !== 0) throw new Error(`Unable to extract BrowserMCP extension bundle: ${extraction.stderr || extraction.stdout || "tar failed"}`);
+  return { extensionDir, accessToken: payload.access_token };
 }
 
 async function discoverExtensionTarget(cdpPort, timeoutMs = 30_000) {
@@ -51,28 +92,6 @@ function cdpEvaluate(targetWebSocketUrl, expression) {
   });
 }
 
-async function requestAccessToken({ baseUrl, workerToken, workerId }) {
-  const resource = `${baseUrl}/browser-mcp`;
-  const response = await fetch(`${baseUrl}/oauth/token`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${workerToken}`,
-      "content-type": "application/x-www-form-urlencoded",
-      accept: "application/json",
-    },
-    body: formBody({
-      grant_type: "urn:render:browser-worker",
-      resource,
-      worker_id: workerId || "browser-worker-vm",
-    }),
-  });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`BrowserMCP VM token bootstrap failed with HTTP ${response.status}: ${text.slice(0, 500)}`);
-  const payload = JSON.parse(text);
-  if (typeof payload.access_token !== "string" || !payload.access_token) throw new Error("BrowserMCP VM token bootstrap did not return an access token");
-  return payload.access_token;
-}
-
 export async function bootstrapBrowserMcp({ cdpPort, baseUrl, workerToken, workerId, accessToken, required = false }) {
   if (!baseUrl) throw new Error("UTILS_BROWSER_WORKER_URL is required for BrowserMCP bootstrap");
   if (!accessToken && !workerToken) {
@@ -84,7 +103,7 @@ export async function bootstrapBrowserMcp({ cdpPort, baseUrl, workerToken, worke
 
   const target = await discoverExtensionTarget(cdpPort);
   const extensionId = new URL(target.url).hostname;
-  const token = accessToken || await requestAccessToken({ baseUrl: baseUrl.replace(/\/$/, ""), workerToken, workerId });
+  const token = accessToken || (await requestBootstrapPayload({ baseUrl: baseUrl.replace(/\/$/, ""), workerToken, workerId })).access_token;
   const bridgeUrl = `${baseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:").replace(/\/$/, "")}/browser-bridge`;
   const result = await cdpEvaluate(
     target.webSocketDebuggerUrl,
