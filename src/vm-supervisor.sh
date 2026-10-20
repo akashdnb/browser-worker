@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -u
 
+if [[ -n "${CHROMIUM_BIN:-}" && -f "${PWD}/src/browser-mcp-chromium-wrapper.mjs" ]]; then
+  export BROWSER_MCP_REAL_CHROMIUM="$CHROMIUM_BIN"
+  export CHROMIUM_BIN="${PWD}/src/browser-mcp-chromium-wrapper.mjs"
+  chmod +x "$CHROMIUM_BIN"
+fi
+
 backoff=2
 max_backoff=30
 
