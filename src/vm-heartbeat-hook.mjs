@@ -1,15 +1,17 @@
 import { mkdir, writeFile, chmod } from "node:fs/promises";
 import WebSocket from "ws";
+import { prepareBrowserMcpExtension } from "./browser-mcp-bootstrap.mjs";
 
 // Keep the heartbeat hook self-contained and also make the VM restore command
 // resilient to Chromium's varying X11 window classes across Playwright images.
 const helperDir = "/tmp/browser-worker-vm-bin";
 const helperPath = `${helperDir}/xdotool`;
 const realXdotool = "/usr/bin/xdotool";
-const browserMcpExtensionDir = process.env.BROWSER_MCP_EXTENSION_DIR || "";
 const realChromium = process.env.CHROMIUM_BIN || "";
 const browserMcpWrapper = `${helperDir}/chromium-browser-mcp`;
 const browserMcpRunner = `${process.cwd()}/src/browser-mcp-bootstrap-runner.mjs`;
+let browserMcpExtensionDir = process.env.BROWSER_MCP_EXTENSION_DIR || `${helperDir}/browser-mcp-extension`;
+let browserMcpReady = false;
 
 try {
   await mkdir(helperDir, { recursive: true });
@@ -40,7 +42,26 @@ exec "${realXdotool}" "$@"
   await chmod(helperPath, 0o755);
   process.env.PATH = `${helperDir}:${process.env.PATH ?? ""}`;
 
-  if (browserMcpExtensionDir && realChromium) {
+  if (realChromium && process.env.UTILS_BROWSER_WORKER_URL && process.env.UTILS_BROWSER_WORKER_TOKEN) {
+    try {
+      const prepared = await prepareBrowserMcpExtension({
+        baseUrl: process.env.UTILS_BROWSER_WORKER_URL,
+        workerToken: process.env.UTILS_BROWSER_WORKER_TOKEN,
+        workerId: process.env.VM_WORKER_ID || "browser-worker-vm",
+        extensionDir: browserMcpExtensionDir,
+      });
+      browserMcpExtensionDir = prepared.extensionDir;
+      process.env.BROWSER_MCP_EXTENSION_ACCESS_TOKEN = prepared.accessToken;
+      browserMcpReady = true;
+      console.log(`BrowserMCP VM extension prepared at ${browserMcpExtensionDir}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (process.env.BROWSER_MCP_EXTENSION_REQUIRED === "true") throw error;
+      console.warn(`BrowserMCP VM extension bootstrap skipped: ${message}`);
+    }
+  }
+
+  if (browserMcpReady) {
     await writeFile(browserMcpWrapper, `#!/usr/bin/env bash
 set -u
 real_bin="${realChromium}"
