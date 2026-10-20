@@ -19,7 +19,7 @@ while true; do
     echo "Interactive VM relay exited with code ${exit_code}; restarting in ${backoff}s"
   fi
 
-  sleep "${backoff}s"
+  sleep "${backoff}"
   if [ "${backoff}" -lt "${max_backoff}" ]; then
     backoff=$((backoff * 2))
     if [ "${backoff}" -gt "${max_backoff}" ]; then
