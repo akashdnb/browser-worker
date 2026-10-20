@@ -48,7 +48,7 @@ extension_dir="${browserMcpExtensionDir}"
 runner="${browserMcpRunner}"
 args=("$@")
 if [[ -d "$extension_dir" ]]; then args+=("--load-extension=$extension_dir"); fi
-"$real_bin" "${args[@]}" &
+"$real_bin" "\${args[@]}" &
 chrome_pid=$!
 bootstrap_status=0
 if [[ -f "$runner" && -d "$extension_dir" ]]; then node "$runner" || bootstrap_status=$?; fi
