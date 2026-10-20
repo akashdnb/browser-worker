@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
+import { monitorProcessExit } from "./process-monitor.js";
 
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, "");
 const utilsBaseUrl = gatewayUrl?.replace(/\/browser-worker\/?$/, "");
@@ -20,11 +21,19 @@ const processes = [];
 const vncSockets = new Map();
 let stopping = false;
 
-function start(command, env = process.env) {
+function start(command, env = process.env, { critical = false } = {}) {
   const child = spawn(command[0], command.slice(1), { env, stdio: ["ignore", "inherit", "inherit"] });
   processes.push(child);
-  child.on("exit", (code, signal) => {
-    if (!stopping && code !== 0) console.error(`VM process exited: ${command[0]} code=${code} signal=${signal}`);
+  monitorProcessExit(child, command[0], {
+    critical,
+    isStopping: () => stopping,
+    onCriticalExit: () => {
+      // Restart the supervisor even when a persistent process exits with code 0.
+      // Otherwise Chromium can disappear while the VM/WebSocket relay remains alive.
+      process.exitCode = 1;
+      void shutdown();
+      setTimeout(() => process.exit(1), 1_000);
+    },
   });
   return child;
 }
@@ -152,9 +161,9 @@ async function startDesktop() {
   await sleep(500);
   await cleanProfileLocks();
 
-  start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env);
+  start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env, { critical: true });
   await sleep(1000);
-  start(["openbox"], env);
+  start(["openbox"], env, { critical: true });
   start([
     chromium,
     "--no-sandbox",
@@ -169,7 +178,7 @@ async function startDesktop() {
     `--remote-debugging-port=${cdpPort}`,
     "--remote-allow-origins=*",
     `--user-data-dir=${userDataDir}`,
-  ], env);
+  ], env, { critical: true });
   start([
     "x11vnc",
     "-display", display,
@@ -184,7 +193,7 @@ async function startDesktop() {
     "-noxdamage",
     "-always_inject",
     "-input", "KMBC",
-  ], env);
+  ], env, { critical: true });
 
   // Do not announce the VM bridge before Chromium is actually available.
   if (!(await probeCdp(30_000))) {
