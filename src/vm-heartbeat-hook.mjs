@@ -6,6 +6,10 @@ import WebSocket from "ws";
 const helperDir = "/tmp/browser-worker-vm-bin";
 const helperPath = `${helperDir}/xdotool`;
 const realXdotool = "/usr/bin/xdotool";
+const browserMcpExtensionDir = process.env.BROWSER_MCP_EXTENSION_DIR || "";
+const realChromium = process.env.CHROMIUM_BIN || "";
+const browserMcpWrapper = `${helperDir}/chromium-browser-mcp`;
+const browserMcpRunner = `${process.cwd()}/src/browser-mcp-bootstrap-runner.mjs`;
 
 try {
   await mkdir(helperDir, { recursive: true });
@@ -35,8 +39,35 @@ exec "${realXdotool}" "$@"
 `, { encoding: "utf8", mode: 0o755 });
   await chmod(helperPath, 0o755);
   process.env.PATH = `${helperDir}:${process.env.PATH ?? ""}`;
+
+  if (browserMcpExtensionDir && realChromium) {
+    await writeFile(browserMcpWrapper, `#!/usr/bin/env bash
+set -u
+real_bin="${realChromium}"
+extension_dir="${browserMcpExtensionDir}"
+runner="${browserMcpRunner}"
+args=("$@")
+if [[ -d "$extension_dir" ]]; then args+=("--load-extension=$extension_dir"); fi
+"$real_bin" "${args[@]}" &
+chrome_pid=$!
+bootstrap_status=0
+if [[ -f "$runner" && -d "$extension_dir" ]]; then node "$runner" || bootstrap_status=$?; fi
+if (( bootstrap_status != 0 )); then
+  echo "BrowserMCP bootstrap failed; stopping Chromium" >&2
+  kill "$chrome_pid" 2>/dev/null || true
+  wait "$chrome_pid" 2>/dev/null || true
+  exit "$bootstrap_status"
+fi
+wait "$chrome_pid"
+`, { encoding: "utf8", mode: 0o755 });
+    await chmod(browserMcpWrapper, 0o755);
+    process.env.REAL_CHROMIUM_BIN = realChromium;
+    process.env.BROWSER_MCP_BOOTSTRAP_RUNNER = browserMcpRunner;
+    process.env.CHROMIUM_BIN = browserMcpWrapper;
+    console.log(`BrowserMCP VM wrapper enabled with extension directory ${browserMcpExtensionDir}`);
+  }
 } catch (error) {
-  console.warn("Could not install VM xdotool helper:", error instanceof Error ? error.message : String(error));
+  console.warn("Could not install VM browser helpers:", error instanceof Error ? error.message : String(error));
 }
 
 const originalEmit = WebSocket.prototype.emit;
