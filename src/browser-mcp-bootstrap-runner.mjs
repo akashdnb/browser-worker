@@ -4,9 +4,9 @@ try {
   await bootstrapBrowserMcp({
     cdpPort: Number(process.env.VM_CHROMIUM_DEBUG_PORT || 9222),
     baseUrl: process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, ""),
+    workerToken: process.env.UTILS_BROWSER_WORKER_TOKEN || "",
+    workerId: process.env.VM_WORKER_ID || "browser-worker-vm",
     accessToken: process.env.BROWSER_MCP_EXTENSION_ACCESS_TOKEN || "",
-    username: process.env.BROWSER_MCP_OAUTH_USERNAME || "",
-    password: process.env.BROWSER_MCP_OAUTH_PASSWORD || "",
     required: process.env.BROWSER_MCP_EXTENSION_REQUIRED !== "false",
   });
 } catch (error) {
