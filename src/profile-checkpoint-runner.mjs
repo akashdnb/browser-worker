@@ -56,7 +56,9 @@ async function publishCheckpoint() {
 
 await mkdir(artifactDir, { recursive: true });
 await publishCheckpoint();
-timer = setInterval(() => void publishCheckpoint(), checkpointSeconds * 1000);
+timer = setInterval(() => {
+  if (!stopping) void publishCheckpoint();
+}, checkpointSeconds * 1000);
 timer.unref?.();
 
 async function shutdown() {
