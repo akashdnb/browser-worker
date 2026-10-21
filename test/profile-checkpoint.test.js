@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -42,7 +43,6 @@ test("checkpoint is valid, omits locks/cache, and preserves live profile", async
     assert.equal(await readFile(path.join(profile, "SingletonLock"), "utf8"), "lock");
     assert.equal(await readFile(path.join(profile, "Default", "Cache", "disposable"), "utf8"), "cache");
     const listing = await new Promise((resolve, reject) => {
-      const { spawn } = await import("node:child_process");
       const child = spawn("tar", ["-tzf", archivePath], { stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
