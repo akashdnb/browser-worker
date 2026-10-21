@@ -1,4 +1,4 @@
-import { mkdir, copyFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, copyFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createProfileCheckpoint, profileIsReady } from "./profile-checkpoint.mjs";
 
@@ -15,9 +15,9 @@ if (!Number.isInteger(checkpointSeconds) || checkpointSeconds < 15 || checkpoint
 
 let stopping = false;
 let checkpointPromise = null;
+let timer;
 
 async function publishCheckpoint() {
-  if (stopping) return;
   if (checkpointPromise) return checkpointPromise;
 
   checkpointPromise = (async () => {
@@ -34,13 +34,13 @@ async function publishCheckpoint() {
     const details = {
       version: 1,
       savedAt: new Date().toISOString(),
-      profileDir,
       archive: path.basename(archivePath),
       bytes: (await stat(archivePath)).size,
     };
-    await copyFile(archivePath, `${artifactDir}/.browser-worker-profile.upload.tmp`);
-    await rename(`${artifactDir}/.browser-worker-profile.upload.tmp`, `${artifactDir}/browser-worker-profile.tar.gz`);
-    await import("node:fs/promises").then(({ writeFile }) => writeFile(markerTemp, JSON.stringify(details, null, 2)));
+    const readyPath = path.join(artifactDir, `browser-worker-profile.${process.pid}.ready.tmp`);
+    await copyFile(archivePath, readyPath);
+    await rename(readyPath, path.join(artifactDir, "browser-worker-profile.tar.gz"));
+    await writeFile(markerTemp, JSON.stringify(details, null, 2));
     await rename(markerTemp, markerPath);
     console.log(`Chromium profile checkpoint saved at ${details.savedAt} (${details.bytes} bytes)`);
   })();
@@ -56,7 +56,7 @@ async function publishCheckpoint() {
 
 await mkdir(artifactDir, { recursive: true });
 await publishCheckpoint();
-const timer = setInterval(() => void publishCheckpoint(), checkpointSeconds * 1000);
+timer = setInterval(() => void publishCheckpoint(), checkpointSeconds * 1000);
 timer.unref?.();
 
 async function shutdown() {
