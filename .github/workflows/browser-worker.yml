@@ -14,10 +14,6 @@ on:
     # Safety-net restart; the active worker normally renews itself 15 minutes before expiry.
     - cron: "17 */6 * * *"
 
-# Self-renewal handoffs carry an explicit source run ID so the active profile
-# is archived/restored safely. A serialized preflight skips delayed schedule,
-# push, or manual starts that would otherwise replace an active worker with a
-# stale last-successful profile snapshot.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
@@ -27,9 +23,6 @@ permissions:
   actions: write
 
 jobs:
-  # Serialize only the preflight checks. This closes the race where a delayed
-  # scheduled run starts beside a live worker and restores an older successful
-  # profile snapshot over the active Chromium profile.
   guard:
     runs-on: ubuntu-latest
     concurrency:
@@ -47,8 +40,6 @@ jobs:
           SOURCE_RUN_ID: ${{ inputs.source_run_id || '' }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          # Self-renewal handoffs explicitly name their source run and must be
-          # allowed to overlap it while waiting for its profile artifact.
           if [ -n "$SOURCE_RUN_ID" ]; then
             echo "Explicit profile handoff from run $SOURCE_RUN_ID"
             echo "should_start=true" >> "$GITHUB_OUTPUT"
@@ -57,7 +48,7 @@ jobs:
 
           active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
           if [ -n "$active_run_id" ]; then
-            echo "::notice::Skipping $EVENT_NAME start: Browser Worker run $active_run_id is already active. Let it retain the current Chromium profile."
+            echo "::notice::Skipping $EVENT_NAME start: Browser Worker run $active_run_id is already active."
             echo "should_start=false" >> "$GITHUB_OUTPUT"
           else
             echo "No other Browser Worker run is active"
@@ -88,13 +79,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
-          mkdir -p browser-worker-state "$RUNNER_TEMP/browser-worker-profile"
+          # The active profile and checkpoint live in the workspace, not RUNNER_TEMP.
+          # On an intentional handoff, always prefer the source run's final artifact.
+          export BROWSER_WORKER_PROFILE_DIR="$GITHUB_WORKSPACE/browser-worker-state/live-profile"
+          mkdir -p browser-worker-state "$BROWSER_WORKER_PROFILE_DIR"
+          echo "BROWSER_WORKER_PROFILE_DIR=$BROWSER_WORKER_PROFILE_DIR" >> "$GITHUB_ENV"
 
           restore_run() {
             local run_id="$1"
             local artifact_dir="browser-worker-state/profile-artifact"
             local archive="$artifact_dir/browser-worker-profile.tar.gz"
-            local extracted="$RUNNER_TEMP/browser-worker-profile-restore"
+            local extracted="$GITHUB_WORKSPACE/browser-worker-state/profile-restore"
             echo "Restoring browser profile from workflow run $run_id"
             rm -rf "$artifact_dir" "$extracted"
             if ! gh run download "$run_id" -n browser-worker-profile -D "$artifact_dir" 2>/dev/null; then
@@ -121,20 +116,14 @@ jobs:
               rm -rf "$extracted"
               return 1
             fi
-
-            # Compatibility for archives written by the older workflow, which
-            # deleted CacheStorage while archiving. A profile recovery handoff
-            # may stage that directory as a sibling to survive the old cleanup.
             local cache_backup="$extracted/browser-worker-profile/Default/Service Worker/CacheStorage.preserved"
             local cache_target="$extracted/browser-worker-profile/Default/Service Worker/CacheStorage"
             if [ -d "$cache_backup" ]; then
               rm -rf "$cache_target"
               mv "$cache_backup" "$cache_target"
-              echo "Restored preserved Service Worker CacheStorage from legacy profile archive"
             fi
-
-            rm -rf "$RUNNER_TEMP/browser-worker-profile"
-            mv "$extracted/browser-worker-profile" "$RUNNER_TEMP/browser-worker-profile"
+            rm -rf "$BROWSER_WORKER_PROFILE_DIR"
+            mv "$extracted/browser-worker-profile" "$BROWSER_WORKER_PROFILE_DIR"
             rm -rf "$extracted"
             echo "Restored full Chromium profile from workflow run $run_id"
             return 0
@@ -158,8 +147,8 @@ jobs:
                 break
               fi
               echo "Source browser profile artifact not available yet (attempt $attempt/80); waiting 15s"
-              rm -rf "$RUNNER_TEMP/browser-worker-profile"
-              mkdir -p "$RUNNER_TEMP/browser-worker-profile"
+              rm -rf "$BROWSER_WORKER_PROFILE_DIR"
+              mkdir -p "$BROWSER_WORKER_PROFILE_DIR"
               rm -rf browser-worker-state/profile-artifact
               sleep 15
             done
@@ -180,7 +169,7 @@ jobs:
                 fi
               done <<< "$previous_run_ids"
               if [ "$restored" != "true" ]; then
-                echo "::error::Previous successful runs exist, but none contains a valid Chromium profile archive. Refusing to start a fresh profile and overwrite browser state."
+                echo "::error::Previous successful runs exist, but none contains a valid Chromium profile archive. Refusing to start a fresh profile."
                 exit 1
               fi
             else
@@ -209,7 +198,6 @@ jobs:
         run: |
           for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 20 --json databaseId --jq '.[].databaseId'); do
             if [ "$run_id" != "$CURRENT_RUN_ID" ]; then
-              echo "Cancelling stale Browser Worker run $run_id"
               gh run cancel "$run_id" || true
             fi
           done
@@ -221,7 +209,9 @@ jobs:
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
           BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
-          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ runner.temp }}/browser-worker-profile
+          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ github.workspace }}/browser-worker-state/live-profile
+          BROWSER_WORKER_CHECKPOINT_DIR: ${{ github.workspace }}/browser-worker-state/live-checkpoint
+          BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
           WORKER_MAX_SECONDS: "19800"
@@ -239,11 +229,12 @@ jobs:
 
           bash src/vm-supervisor.sh > "$RUNNER_TEMP/interactive-vm.log" 2>&1 &
           vm_pid=$!
-          trap 'kill "$vm_pid" 2>/dev/null || true; wait "$vm_pid" 2>/dev/null || true' EXIT
+          # Background checkpoints preserve the latest tab/session files while Chrome
+          # remains open; no browser restart or shutdown is needed to create them.
+          node src/profile-checkpoint-runner.mjs &
+          checkpoint_pid=$!
+          trap 'kill "$vm_pid" "$checkpoint_pid" 2>/dev/null || true; wait "$vm_pid" "$checkpoint_pid" 2>/dev/null || true' EXIT
 
-          # Render may be restarting or deploying while the runner is already
-          # starting. Keep the runner alive long enough for the supervisor to
-          # reconnect instead of failing the workflow after 60 seconds.
           for attempt in $(seq 1 300); do
             if grep -q "Interactive VM connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
               echo "Interactive VM relay is connected"
@@ -268,35 +259,26 @@ jobs:
       - name: Prepare browser profile artifact
         if: ${{ always() }}
         run: |
-          profile_dir="$RUNNER_TEMP/browser-worker-profile"
+          profile_dir="$BROWSER_WORKER_PROFILE_DIR"
           if [ ! -d "$profile_dir" ]; then
             echo "::error::Chromium profile directory is missing; refusing to publish an empty profile artifact"
             exit 1
           fi
           if [ ! -s "$profile_dir/Local State" ] || [ ! -s "$profile_dir/Default/Preferences" ]; then
-            echo "::error::Chromium did not populate the configured profile directory ($profile_dir). Check the --user-data-dir argument; refusing to publish a blank snapshot."
+            echo "::error::Chromium did not populate the configured profile directory ($profile_dir). Refusing to publish a blank snapshot."
             find "$profile_dir" -maxdepth 2 -type f -printf '%P (%s bytes)\n' | head -n 50
             exit 1
           fi
 
-          # Remove process-specific locks and disposable caches only. Keep
-          # cookies, History, Local Storage, IndexedDB, and Service Worker data.
-          find "$profile_dir" -maxdepth 1 -type f \( -name 'SingletonLock' -o -name 'SingletonCookie' -o -name 'SingletonSocket' -o -name 'DevToolsActivePort' \) -delete
-          rm -rf \
-            "$profile_dir/Default/Cache" \
-            "$profile_dir/Default/Code Cache" \
-            "$profile_dir/Default/GPUCache" \
-            "$profile_dir/Default/GrShaderCache" \
-            "$profile_dir/Default/ShaderCache" \
-            "$profile_dir/Crashpad" \
-            "$profile_dir/Crash Reports" \
-            "$profile_dir/BrowserMetrics" \
-            "$profile_dir/GraphiteDawnCache" \
-            "$profile_dir/GrShaderCache"
-
-          tar -czf browser-worker-profile.tar.gz -C "$RUNNER_TEMP" browser-worker-profile
-          tar -tzf browser-worker-profile.tar.gz | grep -Fx "browser-worker-profile/Local State" > /dev/null
-          tar -tzf browser-worker-profile.tar.gz | grep -Fx "browser-worker-profile/Default/Preferences" > /dev/null
+          # Archive from a copy so final cleanup never mutates the profile that
+          # Chromium may still be using during an unexpected stop.
+          node --input-type=module -e '
+            import { createProfileCheckpoint } from "./src/profile-checkpoint.mjs";
+            await createProfileCheckpoint({ profileDir: process.env.BROWSER_WORKER_PROFILE_DIR, outputDir: process.cwd() });
+          '
+          mv browser-worker-profile.tar.gz browser-worker-profile.final.tar.gz
+          # Keep a single predictable artifact filename consumed by restore_run.
+          mv browser-worker-profile.final.tar.gz browser-worker-profile.tar.gz
           ls -lh browser-worker-profile.tar.gz
 
       - name: Upload browser profile
@@ -305,6 +287,15 @@ jobs:
         with:
           name: browser-worker-profile
           path: browser-worker-profile.tar.gz
+          retention-days: 90
+          overwrite: true
+
+      - name: Upload latest checkpoint archive
+        if: ${{ always() && hashFiles('browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-worker-profile-checkpoint
+          path: browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz
           retention-days: 90
           overwrite: true
 
