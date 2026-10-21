@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
 const LOCK_NAMES = ["SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"];
 const DISPOSABLE_PATHS = [
