@@ -441,13 +441,50 @@ async function main() {
   disconnectAllVnc();
 }
 
+async function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once("exit", onExit);
+  });
+}
+
 async function shutdown() {
   if (stopping) return;
   stopping = true;
   disconnectAllVnc();
-  for (const child of [...processes].reverse()) {
-    if (!child.killed) child.kill("SIGTERM");
+
+  // Ask Chromium to exit first and give it time to flush its session/tab files.
+  // Killing its parent VM relay must not race Chromium's clean profile shutdown.
+  const chromiumChildren = processes.filter((child) =>
+    (child.spawnargs?.[0] ?? "") === chromium
+  );
+  const remainingChildren = processes.filter((child) =>
+    (child.spawnargs?.[0] ?? "") !== chromium
+  );
+
+  for (const child of chromiumChildren) {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   }
+  for (const child of chromiumChildren) {
+    if (!(await waitForChildExit(child, 15_000))) {
+      console.warn("Chromium did not exit gracefully within 15s; forcing termination");
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await waitForChildExit(child, 2_000);
+    }
+  }
+
+  for (const child of [...remainingChildren].reverse()) {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  }
+  await Promise.all(remainingChildren.map((child) => waitForChildExit(child, 2_000)));
 }
 
 process.on("SIGTERM", () => void shutdown());
