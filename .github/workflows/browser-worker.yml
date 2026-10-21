@@ -81,6 +81,7 @@ jobs:
           export BROWSER_WORKER_PROFILE_DIR="$GITHUB_WORKSPACE/browser-worker-state/live-profile"
           mkdir -p browser-worker-state "$BROWSER_WORKER_PROFILE_DIR"
           echo "BROWSER_WORKER_PROFILE_DIR=$BROWSER_WORKER_PROFILE_DIR" >> "$GITHUB_ENV"
+          echo "BROWSER_WORKER_PROFILE_DIR=$BROWSER_WORKER_PROFILE_DIR" >> "$GITHUB_ENV"
 
           restore_archive() {
             local archive="$1"
