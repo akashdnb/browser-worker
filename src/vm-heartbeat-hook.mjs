@@ -43,11 +43,15 @@ exec "${realXdotool}" "$@"
   await chmod(helperPath, 0o755);
   process.env.PATH = `${helperDir}:${process.env.PATH ?? ""}`;
 
-  if (realChromium && process.env.UTILS_BROWSER_WORKER_URL && process.env.UTILS_BROWSER_WORKER_TOKEN) {
+  const workerUrl = process.env.UTILS_BROWSER_WORKER_URL || "";
+  const workerToken = process.env.UTILS_BROWSER_WORKER_TOKEN || "";
+  const extensionRequired = process.env.BROWSER_MCP_EXTENSION_REQUIRED !== "false";
+  if (realChromium && (workerUrl || workerToken)) {
+    if (!workerUrl || !workerToken) throw new Error("BrowserMCP VM extension bootstrap requires both UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN");
     try {
       browserMcpExtension = await prepareBrowserMcpExtension({
-        baseUrl: process.env.UTILS_BROWSER_WORKER_URL,
-        workerToken: process.env.UTILS_BROWSER_WORKER_TOKEN,
+        baseUrl: workerUrl,
+        workerToken,
         workerId: process.env.VM_WORKER_ID || "browser-worker-vm",
         extensionDir: browserMcpExtensionDir,
       });
@@ -57,7 +61,7 @@ exec "${realXdotool}" "$@"
       console.log(`BrowserMCP VM extension prepared at ${browserMcpExtensionDir} (version ${browserMcpExtension.extensionVersion}, authoritative ${browserMcpExtension.authoritativeVersion}, updated=${browserMcpExtension.updated})`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (process.env.BROWSER_MCP_EXTENSION_REQUIRED === "true") throw error;
+      if (extensionRequired) throw error;
       console.warn(`BrowserMCP VM extension bootstrap skipped: ${message}`);
     }
   }

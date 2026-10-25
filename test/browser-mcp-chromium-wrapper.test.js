@@ -7,11 +7,12 @@ test("VM startup prepares the BrowserMCP extension before Chrome", async () => {
   assert.match(hook, /prepareBrowserMcpExtension/);
   assert.match(hook, /--load-extension=\$extension_dir/);
   assert.match(hook, /--disable-extensions-except=\$extension_dir/);
+  assert.match(hook, /BROWSER_MCP_EXTENSION_REQUIRED !== "false"/);
   assert.match(hook, /rollbackBrowserMcpExtensionUpdate/);
   assert.match(hook, /finalizeBrowserMcpExtensionUpdate/);
 });
 
-test("BrowserMCP bootstrap retries failures and validates the authoritative extension", async () => {
+test("BrowserMCP bootstrap validates the authoritative extension", async () => {
   const bootstrap = await readFile(new URL("../src/browser-mcp-bootstrap.mjs", import.meta.url), "utf8");
   assert.match(bootstrap, /grant_type: "urn:render:browser-worker"/);
   assert.match(bootstrap, /extension_version/);
