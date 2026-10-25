@@ -63,11 +63,15 @@ async function discoverExtensionTarget(cdpPort, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   let lastTargets = [];
   while (Date.now() < deadline) {
-    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, { signal: AbortSignal.timeout(1500) });
-    if (response.ok) {
-      lastTargets = await response.json();
-      const target = lastTargets.find((item) => item.type === "service_worker" && /^chrome-extension:\/\/[a-p]{32}\//.test(item.url || ""));
-      if (target) return target;
+    try {
+      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, { signal: AbortSignal.timeout(1500) });
+      if (response.ok) {
+        lastTargets = await response.json();
+        const target = lastTargets.find((item) => item.type === "service_worker" && /^chrome-extension:\/\/[a-p]{32}\//.test(item.url || ""));
+        if (target) return target;
+      }
+    } catch {
+      // Chromium can take a few seconds to bind the CDP port after launch.
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
