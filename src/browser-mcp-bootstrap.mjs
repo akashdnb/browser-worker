@@ -5,9 +5,25 @@ function formBody(values) {
   return new URLSearchParams(values).toString();
 }
 
+function httpBaseUrl(baseUrl) {
+  return baseUrl
+    .replace(/^wss:/, "https:")
+    .replace(/^ws:/, "http:")
+    .replace(/\/browser-worker\/?$/, "");
+}
+
+function bridgeBaseUrl(baseUrl) {
+  return baseUrl
+    .replace(/^https:/, "wss:")
+    .replace(/^http:/, "ws:")
+    .replace(/\/browser-worker\/?$/, "")
+    .replace(/\/$/, "");
+}
+
 async function requestBootstrapPayload({ baseUrl, workerToken, workerId }) {
-  const resource = `${baseUrl}/browser-mcp`;
-  const response = await fetch(`${baseUrl}/oauth/token`, {
+  const httpBase = httpBaseUrl(baseUrl);
+  const resource = `${httpBase}/browser-mcp`;
+  const response = await fetch(`${httpBase}/oauth/token`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${workerToken}`,
@@ -104,7 +120,7 @@ export async function bootstrapBrowserMcp({ cdpPort, baseUrl, workerToken, worke
   const target = await discoverExtensionTarget(cdpPort);
   const extensionId = new URL(target.url).hostname;
   const token = accessToken || (await requestBootstrapPayload({ baseUrl: baseUrl.replace(/\/$/, ""), workerToken, workerId })).access_token;
-  const bridgeUrl = `${baseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:").replace(/\/$/, "")}/browser-bridge`;
+  const bridgeUrl = `${bridgeBaseUrl(baseUrl)}/browser-bridge`;
   const result = await cdpEvaluate(
     target.webSocketDebuggerUrl,
     `chrome.storage.local.set(${JSON.stringify({ accessToken: token, bridgeUrl, vmAutoAuth: true })}).then(() => chrome.storage.local.get({ accessToken: "", bridgeUrl: "" }))`,
