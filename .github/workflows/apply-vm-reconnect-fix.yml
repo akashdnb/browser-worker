@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - fix/interactive-vm-gateway-reconnect
+  pull_request:
+    branches:
+      - fix/interactive-vm-gateway-reconnect
 
 permissions:
   contents: write
@@ -15,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
       - name: Apply patch
         run: git apply vm-reconnect-vm.patch
@@ -25,4 +28,4 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/vm.js
           git commit -m 'fix(vm): reconnect relay without restarting desktop'
-          git push origin HEAD:${GITHUB_REF_NAME}
+          git push origin HEAD:${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}
