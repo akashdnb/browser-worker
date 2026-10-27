@@ -373,72 +373,109 @@ function disconnectAllVnc() {
   for (const clientId of vncSockets.keys()) disconnectVnc(clientId);
 }
 
+async function connectRelay(uri) {
+  return await new Promise((resolve, reject) => {
+    const websocket = new WebSocket(uri, {
+      maxPayload: 16 * 1024 * 1024,
+      handshakeTimeout: 15_000,
+    });
+    let heartbeat;
+    let connected = false;
+    let fatalError = null;
+
+    websocket.on("open", () => {
+      websocket.send(JSON.stringify({
+        type: "vm.hello",
+        token,
+        workerId,
+        capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
+      }));
+      connected = true;
+      console.log(`Interactive VM connected to utils as ${workerId}`);
+      console.log(`Shared Chromium is expected on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
+      void probeCdp();
+      heartbeat = setInterval(() => {
+        if (websocket.readyState === WebSocket.OPEN) {
+          websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
+        }
+      }, 15_000);
+    });
+
+    websocket.on("message", async (raw, isBinary) => {
+      if (isBinary) return;
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (message.type === "vm.auth.failed") {
+        fatalError = new Error("Interactive VM authentication failed");
+        console.error(fatalError.message);
+        websocket.close();
+        return;
+      }
+      if (message.type === "vm.desktop.start") {
+        try {
+          await connectVnc(websocket, String(message.clientId));
+          console.log(`Interactive VM VNC bridge attached for ${message.clientId}`);
+        } catch (error) {
+          console.error(`Failed to connect VNC bridge for ${message.clientId}:`, error instanceof Error ? error.message : error);
+        }
+        return;
+      }
+      if (message.type === "vm.desktop.input") {
+        const clientId = String(message.clientId ?? "");
+        const socket = vncSockets.get(clientId);
+        if (!socket || socket.destroyed || typeof message.data !== "string") return;
+        try { socket.write(Buffer.from(message.data, "base64")); } catch (error) {
+          console.error(`Failed to forward VNC input for ${clientId}:`, error instanceof Error ? error.message : error);
+        }
+        return;
+      }
+      if (message.type === "vm.desktop.stop") {
+        disconnectVnc(String(message.clientId ?? ""));
+        return;
+      }
+      if (message.type === "vm.command") {
+        try {
+          const result = await handleCommand(message.payload ?? {});
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: "vm.response", requestId: message.requestId, ...result }));
+          }
+        } catch (error) {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: "vm.response", requestId: message.requestId, ok: false, error: error instanceof Error ? error.message : String(error) }));
+          }
+        }
+      }
+    });
+
+    websocket.on("error", (error) => console.error("Interactive VM WebSocket error:", error.message));
+    websocket.on("close", (code, reason) => {
+      if (heartbeat) clearInterval(heartbeat);
+      disconnectAllVnc();
+      if (fatalError) {
+        reject(fatalError);
+        return;
+      }
+      console.warn(`Interactive VM relay disconnected (code=${code}, reason=${reason.toString() || "none"})`);
+      resolve({ connected });
+    });
+  });
+}
+
 async function main() {
   await startDesktop();
   await waitForPort("127.0.0.1", vncPort);
 
   const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
-  const websocket = new WebSocket(uri, { maxPayload: 16 * 1024 * 1024, handshakeTimeout: 15_000 });
+  let backoffMs = 2_000;
 
-  websocket.on("open", () => {
-    websocket.send(JSON.stringify({ type: "vm.hello", token, workerId, capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"] }));
-    console.log(`Interactive VM connected to utils as ${workerId}`);
-    console.log(`Shared Chromium is expected on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
-    void probeCdp();
-  });
-
-  websocket.on("message", async (raw, isBinary) => {
-    if (isBinary) return;
-    let message;
-    try { message = JSON.parse(raw.toString()); } catch { return; }
-    if (message.type === "vm.auth.failed") {
-      console.error("Interactive VM authentication failed");
-      websocket.close();
-      return;
-    }
-    if (message.type === "vm.desktop.start") {
-      try {
-        await connectVnc(websocket, String(message.clientId));
-        console.log(`Interactive VM VNC bridge attached for ${message.clientId}`);
-      } catch (error) {
-        console.error(`Failed to connect VNC bridge for ${message.clientId}:`, error instanceof Error ? error.message : error);
-      }
-      return;
-    }
-    if (message.type === "vm.desktop.input") {
-      const clientId = String(message.clientId ?? "");
-      const socket = vncSockets.get(clientId);
-      if (!socket || socket.destroyed || typeof message.data !== "string") return;
-      try {
-        socket.write(Buffer.from(message.data, "base64"));
-      } catch (error) {
-        console.error(`Failed to forward VNC input for ${clientId}:`, error instanceof Error ? error.message : error);
-      }
-      return;
-    }
-    if (message.type === "vm.desktop.stop") {
-      disconnectVnc(String(message.clientId ?? ""));
-      return;
-    }
-    if (message.type === "vm.command") {
-      try {
-        const result = await handleCommand(message.payload ?? {});
-        websocket.send(JSON.stringify({ type: "vm.response", requestId: message.requestId, ...result }));
-      } catch (error) {
-        websocket.send(JSON.stringify({ type: "vm.response", requestId: message.requestId, ok: false, error: error instanceof Error ? error.message : String(error) }));
-      }
-    }
-  });
-
-  websocket.on("error", (error) => console.error("Interactive VM WebSocket error:", error.message));
-
-  const heartbeat = setInterval(() => {
-    if (websocket.readyState === WebSocket.OPEN) websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
-  }, 15_000);
-
-  await new Promise((resolve) => websocket.on("close", resolve));
-  clearInterval(heartbeat);
-  disconnectAllVnc();
+  while (!stopping) {
+    const connection = await connectRelay(uri);
+    if (stopping) break;
+    if (connection.connected) backoffMs = 2_000;
+    console.warn(`Interactive VM relay will reconnect in ${backoffMs / 1000}s without restarting Chromium`);
+    await sleep(backoffMs);
+    backoffMs = Math.min(backoffMs * 2, 30_000);
+  }
 }
 
 async function waitForChildExit(child, timeoutMs) {
