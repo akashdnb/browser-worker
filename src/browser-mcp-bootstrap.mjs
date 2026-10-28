@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 
@@ -35,6 +36,10 @@ export function compareExtensionVersions(left, right) {
   return 0;
 }
 
+export function extensionBundleFingerprint(bundleBase64) {
+  return createHash("sha256").update(String(bundleBase64)).digest("hex");
+}
+
 async function requestBootstrapPayload({ baseUrl, workerToken, workerId }) {
   const httpBase = httpBaseUrl(baseUrl);
   const resource = `${httpBase}/browser-mcp`;
@@ -69,6 +74,15 @@ async function readInstalledVersion(extensionDir) {
     const manifest = JSON.parse(await readFile(`${extensionDir}/manifest.json`, "utf8"));
     if (typeof manifest.version !== "string" || !manifest.version) return null;
     return manifest.version;
+  } catch {
+    return null;
+  }
+}
+
+async function readInstalledFingerprint(extensionDir) {
+  try {
+    const fingerprint = (await readFile(`${extensionDir}/.installed-fingerprint`, "utf8")).trim();
+    return fingerprint || null;
   } catch {
     return null;
   }
@@ -123,11 +137,13 @@ export async function prepareBrowserMcpExtension({ baseUrl, workerToken, workerI
   const backupDir = `${extensionDir}.previous`;
   const stagingRoot = `${extensionDir}.staging-${process.pid}`;
   const archivePath = `${stagingRoot}.tar.gz`;
+  const authoritativeFingerprint = extensionBundleFingerprint(payload.extension_bundle_base64);
 
   await mkdir(extensionDir.substring(0, extensionDir.lastIndexOf("/")) || ".", { recursive: true });
   await recoverInterruptedInstall(extensionDir);
 
   const installedVersion = await readInstalledVersion(extensionDir);
+  const installedFingerprint = await readInstalledFingerprint(extensionDir);
   const pendingUpdate = await readPendingUpdate(extensionDir);
   if (pendingUpdate && !(await pathExists(backupDir))) {
     await rm(`${extensionDir}/.update-pending`, { force: true });
@@ -138,10 +154,13 @@ export async function prepareBrowserMcpExtension({ baseUrl, workerToken, workerI
       console.warn(`BrowserMCP extension ${installedVersion} has an unvalidated update; keeping rollback backup while service-worker validation runs`);
       return { extensionDir, accessToken: payload.access_token, extensionVersion: installedVersion, authoritativeVersion: payload.extension_version, previousVersion: pendingUpdate.previousVersion ?? installedVersion, updated: true, backupDir };
     }
-    if (comparison >= 0) {
+    // Version numbers are not sufficient to identify the VM bundle: the extension
+    // code can change without a manifest bump. Reinstall equal-version bundles when
+    // their content fingerprint changes, while never downgrading a newer installed version.
+    if (comparison > 0 || (comparison === 0 && installedFingerprint === authoritativeFingerprint)) {
       await rm(backupDir, { recursive: true, force: true });
       console.log(`BrowserMCP extension ${installedVersion} already satisfies authoritative version ${payload.extension_version}; reusing cached files${comparison > 0 ? " (installed version is newer; no downgrade)" : ""}`);
-      return { extensionDir, accessToken: payload.access_token, extensionVersion: installedVersion, authoritativeVersion: payload.extension_version, previousVersion: installedVersion, updated: false, backupDir: null };
+      return { extensionDir, accessToken: payload.access_token, extensionVersion: installedVersion, authoritativeVersion: payload.extension_version, previousVersion: installedVersion, updated: false, backupDir: null, bundleFingerprint: installedFingerprint };
     }
   }
 
@@ -165,6 +184,7 @@ export async function prepareBrowserMcpExtension({ baseUrl, workerToken, workerI
       await writeFile(`${unpackedDir}/.update-pending`, JSON.stringify({ previousVersion: installedVersion, targetVersion: payload.extension_version }), { mode: 0o600 });
     }
     await writeFile(`${unpackedDir}/.installed-version`, payload.extension_version, { mode: 0o600 });
+    await writeFile(`${unpackedDir}/.installed-fingerprint`, authoritativeFingerprint, { mode: 0o600 });
     try {
       await rename(unpackedDir, extensionDir);
     } catch (error) {
@@ -172,8 +192,8 @@ export async function prepareBrowserMcpExtension({ baseUrl, workerToken, workerI
       throw error;
     }
 
-    console.log(`Prepared BrowserMCP extension ${payload.extension_version} (previous: ${installedVersion ?? "none"}); service worker manifest validated`);
-    return { extensionDir, accessToken: payload.access_token, extensionVersion: payload.extension_version, authoritativeVersion: payload.extension_version, previousVersion: installedVersion, updated: true, backupDir: hadPrevious ? backupDir : null };
+    console.log(`Prepared BrowserMCP extension ${payload.extension_version} (previous: ${installedVersion ?? "none"}, fingerprint: ${authoritativeFingerprint.slice(0, 12)}); service worker manifest validated`);
+    return { extensionDir, accessToken: payload.access_token, extensionVersion: payload.extension_version, authoritativeVersion: payload.extension_version, previousVersion: installedVersion, updated: true, backupDir: hadPrevious ? backupDir : null, bundleFingerprint: authoritativeFingerprint };
   } catch (error) {
     console.error(`BrowserMCP extension update failed; keeping ${installedVersion ?? "no installed version"}:`, error instanceof Error ? error.message : String(error));
     throw error;

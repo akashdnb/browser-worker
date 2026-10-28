@@ -4,14 +4,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { compareExtensionVersions, prepareBrowserMcpExtension, rollbackBrowserMcpExtensionUpdate } from "../src/browser-mcp-bootstrap.mjs";
+import { compareExtensionVersions, extensionBundleFingerprint, prepareBrowserMcpExtension, rollbackBrowserMcpExtensionUpdate } from "../src/browser-mcp-bootstrap.mjs";
 
-async function makeBundle(version) {
+async function makeBundle(version, body = "self.addEventListener('install', () => {});") {
   const root = await mkdtemp(join(tmpdir(), "browser-mcp-bundle-"));
   const extension = join(root, "browser_extension");
   await mkdir(extension, { recursive: true });
   await writeFile(join(extension, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "Browser MCP", version, background: { service_worker: "background.js" } }));
-  await writeFile(join(extension, "background.js"), "self.addEventListener('install', () => {});");
+  await writeFile(join(extension, "background.js"), body);
   const archive = `${root}.tar.gz`;
   assert.equal(spawnSync("tar", ["-czf", archive, "-C", root, "browser_extension"]).status, 0);
   return { root, archive };
@@ -33,6 +33,11 @@ test("extension versions compare numerically", () => {
   assert.equal(compareExtensionVersions("1.0", "1.0.0"), 0);
 });
 
+test("extension bundle fingerprints change when bundle content changes", () => {
+  assert.notEqual(extensionBundleFingerprint("bundle-a"), extensionBundleFingerprint("bundle-b"));
+  assert.equal(extensionBundleFingerprint("bundle-a"), extensionBundleFingerprint("bundle-a"));
+});
+
 test("same version is reused and newer installed versions are not downgraded", async () => {
   const root = await mkdtemp(join(tmpdir(), "browser-mcp-extension-"));
   const extensionDir = join(root, "BrowserMCPExtension");
@@ -51,6 +56,34 @@ test("same version is reused and newer installed versions are not downgraded", a
     await rm(root, { recursive: true, force: true });
     await rm(bundle.root, { recursive: true, force: true });
     await rm(bundle.archive, { force: true });
+  }
+});
+
+test("same manifest version is refreshed when the extension bundle changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "browser-mcp-extension-"));
+  const extensionDir = join(root, "BrowserMCPExtension");
+  const first = await makeBundle("0.5.2", "globalThis.__bundleRevision = 1;");
+  const second = await makeBundle("0.5.2", "globalThis.__bundleRevision = 2;");
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = mockFetch("0.5.2", first.archive);
+    const firstResult = await prepareBrowserMcpExtension({ baseUrl: "https://utils.example", workerToken: "worker", workerId: "test", extensionDir });
+    assert.equal(firstResult.updated, true);
+    assert.equal(await readFile(join(extensionDir, "background.js"), "utf8"), "globalThis.__bundleRevision = 1;");
+    const firstFingerprint = await readFile(join(extensionDir, ".installed-fingerprint"), "utf8");
+
+    globalThis.fetch = mockFetch("0.5.2", second.archive);
+    const secondResult = await prepareBrowserMcpExtension({ baseUrl: "https://utils.example", workerToken: "worker", workerId: "test", extensionDir });
+    assert.equal(secondResult.updated, true);
+    assert.equal(await readFile(join(extensionDir, "background.js"), "utf8"), "globalThis.__bundleRevision = 2;");
+    assert.notEqual(await readFile(join(extensionDir, ".installed-fingerprint"), "utf8"), firstFingerprint);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+    await rm(first.root, { recursive: true, force: true });
+    await rm(first.archive, { force: true });
+    await rm(second.root, { recursive: true, force: true });
+    await rm(second.archive, { force: true });
   }
 });
 
