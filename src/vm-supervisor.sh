@@ -10,8 +10,14 @@ max_backoff=30
 
 while true; do
   echo "Starting interactive VM relay (backoff=${backoff}s)"
+  node src/cdp-watchdog.mjs &
+  watchdog_pid=$!
+
   node src/vm.js
   exit_code=$?
+
+  kill "${watchdog_pid}" 2>/dev/null || true
+  wait "${watchdog_pid}" 2>/dev/null || true
 
   if [ "${exit_code}" -eq 0 ]; then
     echo "Interactive VM relay exited normally; restarting in ${backoff}s"
