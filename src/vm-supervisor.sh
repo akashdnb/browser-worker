@@ -35,20 +35,58 @@ cleanup_display() {
   fi
 }
 
+stop_helper() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 0
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+hard_recovery() {
+  echo "Applying hard VM recovery: terminating stale Chromium and desktop state"
+  pkill -TERM -f '[c]hromium.*remote-debugging-port' 2>/dev/null || true
+  sleep 1
+  pkill -KILL -f '[c]hromium.*remote-debugging-port' 2>/dev/null || true
+  cleanup_display
+
+  # These locks can survive an abrupt runner/process termination. They are
+  # safe to remove only after Chromium has been terminated.
+  if [ -n "${PLAYWRIGHT_MCP_USER_DATA_DIR:-}" ]; then
+    rm -f \
+      "${PLAYWRIGHT_MCP_USER_DATA_DIR}/SingletonLock" \
+      "${PLAYWRIGHT_MCP_USER_DATA_DIR}/SingletonCookie" \
+      "${PLAYWRIGHT_MCP_USER_DATA_DIR}/SingletonSocket" \
+      "${PLAYWRIGHT_MCP_USER_DATA_DIR}/DevToolsActivePort"
+  fi
+}
+
 trap cleanup_display EXIT INT TERM
 
+consecutive_failures=0
 while true; do
   cleanup_display
+
+  # After repeated startup/runtime failures, escalate from normal cleanup to
+  # a full browser/profile/display reset. This lets the same runner recover
+  # from poisoned Chromium state without requiring a new workflow run.
+  if [ "$consecutive_failures" -ge 3 ]; then
+    hard_recovery
+    consecutive_failures=0
+  fi
+
   echo "Starting interactive VM relay (backoff=${backoff}s)"
   node src/cdp-watchdog.mjs &
   watchdog_pid=$!
+  node src/chrome-tab-guard.mjs &
+  tab_guard_pid=$!
 
   node src/vm.js
   exit_code=$?
 
-  kill "${watchdog_pid}" 2>/dev/null || true
-  wait "${watchdog_pid}" 2>/dev/null || true
+  stop_helper "$watchdog_pid"
+  stop_helper "$tab_guard_pid"
   cleanup_display
+  consecutive_failures=$((consecutive_failures + 1))
 
   if [ "${exit_code}" -eq 0 ]; then
     echo "Interactive VM relay exited normally; restarting in ${backoff}s"
