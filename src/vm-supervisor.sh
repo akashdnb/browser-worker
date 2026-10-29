@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -u
 
-# BrowserMCP VM extension bootstrap is intentionally disabled. The VM browser
-# is controlled through the existing Playwright/CDP path instead. Keep the
-# wrapper implementation in the repository for possible future use.
+# BrowserMCP VM extension bootstrap runs as a Node preload before vm.js so
+# Chromium starts with the authoritative extension and authenticates it.
 
 backoff=2
 max_backoff=30
@@ -80,7 +79,7 @@ while true; do
   node src/chrome-tab-guard.mjs &
   tab_guard_pid=$!
 
-  node src/vm.js
+  node --import ./src/vm-heartbeat-hook.mjs src/vm.js
   exit_code=$?
 
   stop_helper "$watchdog_pid"
