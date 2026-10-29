@@ -8,7 +8,37 @@ set -u
 backoff=2
 max_backoff=30
 
+cleanup_display() {
+  local display="${DISPLAY:-:99}"
+  local display_num="${display#:}"
+
+  # vm.js owns these desktop processes. Clean them before every retry so a
+  # failed startup cannot leave an X server or desktop helper behind.
+  pkill -TERM -f "^Xvfb ${display}" 2>/dev/null || true
+  pkill -TERM -f "^x11vnc .*${display}" 2>/dev/null || true
+  pkill -TERM -f "^openbox .*${display}" 2>/dev/null || true
+
+  for _ in $(seq 1 20); do
+    if ! pgrep -f "^Xvfb ${display}" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.25
+  done
+
+  if pgrep -f "^Xvfb ${display}" >/dev/null 2>&1; then
+    pkill -KILL -f "^Xvfb ${display}" 2>/dev/null || true
+  fi
+
+  # Only remove the display lock/socket after no Xvfb owns the display.
+  if ! pgrep -f "^Xvfb ${display}" >/dev/null 2>&1; then
+    rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}"
+  fi
+}
+
+trap cleanup_display EXIT INT TERM
+
 while true; do
+  cleanup_display
   echo "Starting interactive VM relay (backoff=${backoff}s)"
   node src/cdp-watchdog.mjs &
   watchdog_pid=$!
@@ -18,6 +48,7 @@ while true; do
 
   kill "${watchdog_pid}" 2>/dev/null || true
   wait "${watchdog_pid}" 2>/dev/null || true
+  cleanup_display
 
   if [ "${exit_code}" -eq 0 ]; then
     echo "Interactive VM relay exited normally; restarting in ${backoff}s"
