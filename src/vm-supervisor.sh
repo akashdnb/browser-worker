@@ -12,25 +12,25 @@ cleanup_display() {
   local display="${DISPLAY:-:99}"
   local display_num="${display#:}"
 
-  # vm.js owns these desktop processes. Clean them before every retry so a
-  # failed startup cannot leave an X server or desktop helper behind.
-  pkill -TERM -f "^Xvfb ${display}" 2>/dev/null || true
-  pkill -TERM -f "^x11vnc .*${display}" 2>/dev/null || true
-  pkill -TERM -f "^openbox .*${display}" 2>/dev/null || true
+  # vm.js owns these desktop processes. Match their command lines by display
+  # so a failed startup cannot leave an X server or desktop helper behind.
+  pkill -TERM -f "Xvfb.*${display}" 2>/dev/null || true
+  pkill -TERM -f "x11vnc.*${display}" 2>/dev/null || true
+  pkill -TERM -f "openbox.*${display}" 2>/dev/null || true
 
   for _ in $(seq 1 20); do
-    if ! pgrep -f "^Xvfb ${display}" >/dev/null 2>&1; then
+    if ! pgrep -af "Xvfb.*${display}" >/dev/null 2>&1; then
       break
     fi
     sleep 0.25
   done
 
-  if pgrep -f "^Xvfb ${display}" >/dev/null 2>&1; then
-    pkill -KILL -f "^Xvfb ${display}" 2>/dev/null || true
+  if pgrep -af "Xvfb.*${display}" >/dev/null 2>&1; then
+    pkill -KILL -f "Xvfb.*${display}" 2>/dev/null || true
   fi
 
   # Only remove the display lock/socket after no Xvfb owns the display.
-  if ! pgrep -f "^Xvfb ${display}" >/dev/null 2>&1; then
+  if ! pgrep -af "Xvfb.*${display}" >/dev/null 2>&1; then
     rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}"
   fi
 }
