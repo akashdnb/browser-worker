@@ -38,21 +38,21 @@ async function enforceLimit() {
   const tabs = await listTabs();
   if (tabs.length <= maxTabs) return;
 
-  // CDP normally returns targets in creation order. Keep the first maxTabs
-  // targets and close the newest excess tabs. Closing is best-effort per tab;
-  // one bad target must not stop the guard from enforcing the global limit.
-  const excess = tabs.slice(maxTabs);
+  // CDP returns page targets in browser tab order for the active Chromium
+  // session. Remove from the beginning so the oldest tab is evicted first.
+  const excessCount = tabs.length - maxTabs;
+  const oldestTabs = tabs.slice(0, excessCount);
   let closed = 0;
-  for (const tab of excess) {
+  for (const tab of oldestTabs) {
     try {
       await closeTab(tab);
       closed += 1;
     } catch (error) {
-      console.warn(`Chrome tab guard could not close ${tab.id}: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`Chrome tab guard could not close oldest tab ${tab.id}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  console.warn(`Chrome tab guard enforced max=${maxTabs}: observed=${tabs.length}, excess=${excess.length}, closed=${closed}`);
+  console.warn(`Chrome tab guard enforced max=${maxTabs}: observed=${tabs.length}, excess=${excessCount}, oldest_closed=${closed}`);
 }
 
 async function run() {
