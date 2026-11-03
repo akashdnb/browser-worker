@@ -107,10 +107,10 @@ bootstrap_status=0
 run_bootstrap || bootstrap_status=$?
 if (( bootstrap_status != 0 )); then
   echo "BrowserMCP bootstrap failed for extension ${browserMcpExtensionDir}" >&2
-  kill "$chrome_pid" 2>/dev/null || true
-  wait "$chrome_pid" 2>/dev/null || true
   if [[ "$extension_updated" == "1" && -n "$backup_dir" ]]; then
     echo "BrowserMCP extension update failed; restoring the previous working version" >&2
+    kill "$chrome_pid" 2>/dev/null || true
+    wait "$chrome_pid" 2>/dev/null || true
     if rollback_update; then
       extension_updated="0"
       backup_dir=""
@@ -121,11 +121,19 @@ if (( bootstrap_status != 0 )); then
         exit $?
       fi
       echo "BrowserMCP extension rollback validation also failed" >&2
-      kill "$chrome_pid" 2>/dev/null || true
-      wait "$chrome_pid" 2>/dev/null || true
+    else
+      echo "BrowserMCP extension rollback failed; starting Chromium with the currently installed bundle" >&2
+      launch_chrome
     fi
   fi
-  exit "$bootstrap_status"
+
+  # Extension authentication is an optional capability of this desktop
+  # process. Do not tear down a healthy Chromium/CDP session merely because
+  # the extension service-worker target was not discoverable yet: the
+  # Playwright MCP worker and the interactive desktop can still use CDP.
+  echo "Keeping Chromium alive; BrowserMCP extension authentication is degraded, but CDP/Playwright remain available" >&2
+  wait "$chrome_pid"
+  exit $?
 fi
 
 if [[ "$extension_updated" == "1" ]]; then
