@@ -73,18 +73,13 @@ exec "${realXdotool}" "$@"
 set -u
 real_bin="${realChromium}"
 extension_dir="${browserMcpExtensionDir}"
-runner="${browserMcpRunner}"
-backup_dir="${backupDir}"
-extension_updated="${extensionUpdated}"
 args=("$@")
 if [[ -d "$extension_dir" ]]; then
   args+=("--load-extension=$extension_dir" "--disable-extensions-except=$extension_dir")
 fi
 
-launch_chrome() {
-  "$real_bin" "\${args[@]}" &
-  chrome_pid=$!
-}
+"$real_bin" "\${args[@]}" &
+chrome_pid=$!
 
 stop_chrome() {
   if [[ -n "\${chrome_pid:-}" ]] && kill -0 "$chrome_pid" 2>/dev/null; then
@@ -96,69 +91,14 @@ stop_chrome() {
 # vm.js supervises this wrapper process. Forward termination to the real
 # Chrome child so a wrapper restart cannot leave an orphan holding the profile.
 trap 'stop_chrome; exit 143' TERM INT
-
-run_bootstrap() {
-  if [[ -f "$runner" && -d "$extension_dir" ]]; then
-    env -u NODE_OPTIONS node "$runner"
-  fi
-}
-
-finalize_update() {
-  [[ "$extension_updated" == "1" ]] || return 0
-  env -u NODE_OPTIONS node --input-type=module -e 'import { finalizeBrowserMcpExtensionUpdate } from "./src/browser-mcp-bootstrap.mjs"; await finalizeBrowserMcpExtensionUpdate({ extensionDir: process.env.BROWSER_MCP_EXTENSION_DIR, backupDir: process.env.BROWSER_MCP_EXTENSION_BACKUP_DIR || null });' || return 1
-}
-
-rollback_update() {
-  [[ "$extension_updated" == "1" && -n "$backup_dir" ]] || return 1
-  BROWSER_MCP_EXTENSION_DIR="$extension_dir" BROWSER_MCP_EXTENSION_BACKUP_DIR="$backup_dir" env -u NODE_OPTIONS node --input-type=module -e 'import { rollbackBrowserMcpExtensionUpdate } from "./src/browser-mcp-bootstrap.mjs"; await rollbackBrowserMcpExtensionUpdate({ extensionDir: process.env.BROWSER_MCP_EXTENSION_DIR, backupDir: process.env.BROWSER_MCP_EXTENSION_BACKUP_DIR });'
-}
-
-launch_chrome
-bootstrap_status=0
-run_bootstrap || bootstrap_status=$?
-if (( bootstrap_status != 0 )); then
-  echo "BrowserMCP bootstrap failed for extension ${browserMcpExtensionDir}" >&2
-  if [[ "$extension_updated" == "1" && -n "$backup_dir" ]]; then
-    echo "BrowserMCP extension update failed; restoring the previous working version" >&2
-    kill "$chrome_pid" 2>/dev/null || true
-    wait "$chrome_pid" 2>/dev/null || true
-    if rollback_update; then
-      extension_updated="0"
-      backup_dir=""
-      launch_chrome
-      if run_bootstrap; then
-        echo "BrowserMCP extension rollback validated successfully"
-        wait "$chrome_pid"
-        exit $?
-      fi
-      echo "BrowserMCP extension rollback validation also failed" >&2
-    else
-      echo "BrowserMCP extension rollback failed; starting Chromium with the currently installed bundle" >&2
-      launch_chrome
-    fi
-  fi
-
-  # Extension authentication is an optional capability of this desktop
-  # process. Do not tear down a healthy Chromium/CDP session merely because
-  # the extension service-worker target was not discoverable yet: the
-  # Playwright MCP worker and the interactive desktop can still use CDP.
-  echo "Keeping Chromium alive; BrowserMCP extension authentication is degraded, but CDP/Playwright remain available" >&2
-  wait "$chrome_pid"
-  exit $?
-fi
-
-if [[ "$extension_updated" == "1" ]]; then
-  BROWSER_MCP_EXTENSION_DIR="$extension_dir" BROWSER_MCP_EXTENSION_BACKUP_DIR="$backup_dir" finalize_update || {
-    echo "BrowserMCP extension validated but cleanup of the previous version failed" >&2
-    exit 1
-  }
-fi
 wait "$chrome_pid"
 `, { encoding: "utf8", mode: 0o755 });
     await chmod(browserMcpWrapper, 0o755);
     process.env.REAL_CHROMIUM_BIN = realChromium;
     process.env.BROWSER_MCP_BOOTSTRAP_RUNNER = browserMcpRunner;
     process.env.BROWSER_MCP_EXTENSION_DIR = browserMcpExtensionDir;
+    process.env.BROWSER_MCP_EXTENSION_BACKUP_DIR = browserMcpExtension.backupDir || "";
+    process.env.BROWSER_MCP_EXTENSION_UPDATED = browserMcpExtension.updated ? "1" : "0";
     process.env.CHROMIUM_BIN = browserMcpWrapper;
     console.log(`BrowserMCP VM wrapper enabled with extension directory ${browserMcpExtensionDir}`);
   }
