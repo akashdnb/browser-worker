@@ -380,24 +380,27 @@ async function connectRelay(uri) {
       handshakeTimeout: 15_000,
     });
     let heartbeat;
+    let authTimer;
     let connected = false;
+    let authenticated = false;
     let fatalError = null;
 
     websocket.on("open", () => {
+      const relay = new URL(uri);
+      console.log(`VM relay WebSocket opened at ${relay.origin}${relay.pathname}; authenticating worker ${workerId}`);
       websocket.send(JSON.stringify({
         type: "vm.hello",
         token,
         workerId,
         capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
       }));
-      connected = true;
-      console.log(`Interactive VM connected to utils as ${workerId}`);
-      console.log(`Shared Chromium is expected on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
-      void probeCdp();
-      heartbeat = setInterval(() => {
-        if (websocket.readyState === WebSocket.OPEN) {
-          websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
-        }
+      // A successful TCP/WebSocket upgrade is not proof that the gateway
+      // accepted this worker. Wait for the explicit auth acknowledgement
+      // before announcing readiness or sending heartbeats.
+      authTimer = setTimeout(() => {
+        fatalError = new Error("Timed out waiting for vm.auth.ok from utils after vm.hello");
+        console.error(fatalError.message);
+        websocket.terminate();
       }, 15_000);
     });
 
@@ -405,12 +408,26 @@ async function connectRelay(uri) {
       if (isBinary) return;
       let message;
       try { message = JSON.parse(raw.toString()); } catch { return; }
-      if (message.type === "vm.auth.failed") {
-        fatalError = new Error("Interactive VM authentication failed");
-        console.error(fatalError.message);
-        websocket.close();
+      if (message.type === "vm.auth.ok") {
+        if (authTimer) clearTimeout(authTimer);
+        authenticated = true;
+        connected = true;
+        console.log(`Interactive VM authenticated and connected to utils as ${workerId}`);
+        console.log(`Shared Chromium is ready on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
+        heartbeat = setInterval(() => {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
+          }
+        }, 15_000);
         return;
       }
+      if (message.type === "vm.auth.failed") {
+        fatalError = new Error("Interactive VM authentication failed: utils rejected vm.hello");
+        console.error(fatalError.message);
+        websocket.close(1008, "worker authentication failed");
+        return;
+      }
+      if (!authenticated) return;
       if (message.type === "vm.desktop.start") {
         try {
           await connectVnc(websocket, String(message.clientId));
@@ -450,6 +467,7 @@ async function connectRelay(uri) {
     websocket.on("error", (error) => console.error("Interactive VM WebSocket error:", error.message));
     websocket.on("close", (code, reason) => {
       if (heartbeat) clearInterval(heartbeat);
+      if (authTimer) clearTimeout(authTimer);
       disconnectAllVnc();
       if (fatalError) {
         reject(fatalError);
