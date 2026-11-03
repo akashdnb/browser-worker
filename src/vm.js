@@ -232,6 +232,29 @@ async function startDesktop() {
     "-input", "KMBC",
   ], env, { critical: true });
   await waitForPort("127.0.0.1", vncPort, 15_000);
+
+  // Do not let extension service-worker discovery race Chromium startup. The
+  // browser and CDP are now confirmed healthy, so extension auth can be
+  // attempted without affecting the underlying desktop/Playwright session.
+  const bootstrapRunner = process.env.BROWSER_MCP_BOOTSTRAP_RUNNER;
+  if (bootstrapRunner) {
+    console.log("CDP is ready; validating BrowserMCP extension authentication");
+    const bootstrap = await runCommand(`env -u NODE_OPTIONS node ${shellQuote(bootstrapRunner)}`, 45);
+    if (!bootstrap.ok) {
+      console.warn(`BrowserMCP extension authentication is degraded; keeping Chromium/CDP alive: ${bootstrap.output || bootstrap.error || "bootstrap failed"}`);
+    } else {
+      console.log(bootstrap.output?.trim() || "BrowserMCP extension authentication completed");
+      if (process.env.BROWSER_MCP_EXTENSION_UPDATED === "1") {
+        const finalized = await runCommand(
+          "env -u NODE_OPTIONS node --input-type=module -e 'import { finalizeBrowserMcpExtensionUpdate } from \"./src/browser-mcp-bootstrap.mjs\"; await finalizeBrowserMcpExtensionUpdate({ extensionDir: process.env.BROWSER_MCP_EXTENSION_DIR, backupDir: process.env.BROWSER_MCP_EXTENSION_BACKUP_DIR || null });'",
+          30,
+        );
+        if (!finalized.ok) {
+          console.warn(`BrowserMCP extension update validated but backup cleanup failed: ${finalized.output || finalized.error || "finalization failed"}`);
+        }
+      }
+    }
+  }
 }
 function clampTimeoutSeconds(value) {
   const parsed = Number(value);
