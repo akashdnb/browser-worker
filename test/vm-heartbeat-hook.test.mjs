@@ -2,10 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-test("extension bootstrap failure does not tear down the interactive Chromium session", async () => {
+test("extension bootstrap is deferred and wrapper shutdown reaches Chromium", async () => {
   const hook = await readFile(new URL("../src/vm-heartbeat-hook.mjs", import.meta.url), "utf8");
+  const vm = await readFile(new URL("../src/vm.js", import.meta.url), "utf8");
 
-  assert.match(hook, /BrowserMCP bootstrap failed for extension/);
-  assert.match(hook, /Keeping Chromium alive; BrowserMCP extension authentication is degraded, but CDP\/Playwright remain available/);
-  assert.match(hook, /wait "\$chrome_pid"\s+exit \$\?/);
+  assert.doesNotMatch(hook, /run_bootstrap\(\)/);
+  assert.match(hook, /trap 'stop_chrome; exit 143' TERM INT/);
+  assert.match(hook, /wait "\$chrome_pid"/);
+  assert.match(vm, /BrowserMCP extension authentication is degraded; keeping Chromium\/CDP and the VM relay alive/);
+  assert.match(vm, /void bootstrapBrowserMcpAfterCdp\(\)/);
 });
