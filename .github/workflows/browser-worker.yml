@@ -211,7 +211,7 @@ jobs:
           test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
           test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
 
-          bash src/vm-supervisor.sh > "$RUNNER_TEMP/interactive-vm.log" 2>&1 &
+          bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
           vm_pid=$!
           node src/profile-checkpoint-runner.mjs &
           checkpoint_pid=$!
