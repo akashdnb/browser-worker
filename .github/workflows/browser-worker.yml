@@ -46,6 +46,16 @@ jobs:
           fi
 
           active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          if [ -n "$active_run_id" ] && [ "$EVENT_NAME" = "push" ]; then
+            echo "::notice::Replacing stale Browser Worker run $active_run_id after a deployment push."
+            gh run cancel "$active_run_id" --repo "$REPO" || true
+            for attempt in $(seq 1 60); do
+              status="$(gh run view "$active_run_id" --repo "$REPO" --json status --jq '.status' 2>/dev/null || true)"
+              if [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then break; fi
+              sleep 2
+            done
+            active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          fi
           if [ -n "$active_run_id" ]; then
             echo "::notice::Skipping $EVENT_NAME start: Browser Worker run $active_run_id is already active."
             echo "should_start=false" >> "$GITHUB_OUTPUT"
