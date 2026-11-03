@@ -43,9 +43,9 @@ stop_helper() {
 
 hard_recovery() {
   echo "Applying hard VM recovery: terminating stale Chromium and desktop state"
-  pkill -TERM -f '[c]hromium.*remote-debugging-port' 2>/dev/null || true
+  pkill -TERM -f '[c]hrom(e|ium).*remote-debugging-port' 2>/dev/null || true
   sleep 1
-  pkill -KILL -f '[c]hromium.*remote-debugging-port' 2>/dev/null || true
+  pkill -KILL -f '[c]hrom(e|ium).*remote-debugging-port' 2>/dev/null || true
   cleanup_display
 
   # These locks can survive an abrupt runner/process termination. They are
