@@ -86,6 +86,17 @@ launch_chrome() {
   chrome_pid=$!
 }
 
+stop_chrome() {
+  if [[ -n "\${chrome_pid:-}" ]] && kill -0 "$chrome_pid" 2>/dev/null; then
+    kill -TERM "$chrome_pid" 2>/dev/null || true
+    wait "$chrome_pid" 2>/dev/null || true
+  fi
+}
+
+# vm.js supervises this wrapper process. Forward termination to the real
+# Chrome child so a wrapper restart cannot leave an orphan holding the profile.
+trap 'stop_chrome; exit 143' TERM INT
+
 run_bootstrap() {
   if [[ -f "$runner" && -d "$extension_dir" ]]; then
     env -u NODE_OPTIONS node "$runner"

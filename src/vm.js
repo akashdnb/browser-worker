@@ -130,40 +130,62 @@ async function cleanProfileLocks() {
   ]);
 }
 
+async function waitForDisplaySocket(timeoutMs = 15_000) {
+  const displayNumber = display.replace(/^:/, "").split(".")[0];
+  const socketPath = `/tmp/.X11-unix/X${displayNumber}`;
+  const deadline = Date.now() + timeoutMs;
+  let lastError = "socket not created";
+
+  while (Date.now() < deadline) {
+    try {
+      await new Promise((resolve, reject) => {
+        const socket = net.createConnection({ path: socketPath });
+        const timer = setTimeout(() => {
+          socket.destroy();
+          reject(new Error("X11 socket connection timed out"));
+        }, 1000);
+        socket.once("connect", () => {
+          clearTimeout(timer);
+          socket.destroy();
+          resolve();
+        });
+        socket.once("error", (error) => {
+          clearTimeout(timer);
+          socket.destroy();
+          reject(error);
+        });
+      });
+      console.log(`X11 display ${display} is ready at ${socketPath}`);
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      await sleep(250);
+    }
+  }
+  throw new Error(`X11 display ${display} did not become ready: ${lastError}`);
+}
+
+async function killStaleChromium() {
+  // Playwright's Linux executable is named "chrome", while older builds may
+  // be named "chromium". Match both: killing only "chromium" leaves the real
+  // browser orphaned when CHROMIUM_BIN is our shell wrapper.
+  const pattern = "'[c]hrom(e|ium).*remote-debugging-port'";
+  await runCommand(`pkill -TERM -f ${pattern} || true; sleep 1; pkill -KILL -f ${pattern} || true`, 5);
+}
+
 async function startDesktop() {
   const env = { ...process.env, DISPLAY: display };
-  await cleanProfileLocks();
 
-  // Reuse Chromium only when its HTTP debugging endpoint responds. A TCP
-  // listener can survive a failed browser startup, so discard stale processes.
-  try {
-    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
-      signal: AbortSignal.timeout(1000),
-    });
-    if (response.ok) {
-      try {
-        await waitForPersistentProfile(2_000);
-        console.log(`Reusing existing Chromium CDP listener on 127.0.0.1:${cdpPort}`);
-        await waitForPort("127.0.0.1", vncPort, 10_000).catch(() => {});
-        return;
-      } catch (error) {
-        console.warn(`Existing Chromium is not using the configured profile at ${userDataDir}: ${error instanceof Error ? error.message : String(error)}; restarting it`);
-      }
-    }
-    console.warn(`Stale CDP HTTP listener returned ${response.status}; restarting Chromium`);
-  } catch {
-    // No usable browser; start a fresh desktop below.
-  }
-
-  // On a reconnect, Chromium may have died while leaving lock files or a
-  // stale process. Clear those before starting another instance on the profile.
-  await runCommand("pkill -TERM -f '[c]hromium.*remote-debugging-port' || true", 3);
-  await sleep(500);
+  // vm-supervisor may have terminated the wrapper process while its real
+  // "chrome" child survived. Never reuse that orphan: it can hold the profile
+  // lock and its old X11 display may already have been removed.
+  await killStaleChromium();
   await cleanProfileLocks();
 
   start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env, { critical: true });
-  await sleep(1000);
+  await waitForDisplaySocket();
   start(["openbox"], env, { critical: true });
+
   start([
     chromium,
     "--no-sandbox",
@@ -179,6 +201,21 @@ async function startDesktop() {
     "--remote-allow-origins=*",
     `--user-data-dir=${userDataDir}`,
   ], env, { critical: true });
+
+  // Start VNC only after the display and browser are confirmed. A transient
+  // x11vnc startup failure must not kill Chromium while CDP is booting.
+  if (!(await probeCdp(30_000))) {
+    await killStaleChromium();
+    throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
+  }
+
+  try {
+    await waitForPersistentProfile();
+  } catch (error) {
+    await killStaleChromium();
+    throw error;
+  }
+
   start([
     "x11vnc",
     "-display", display,
@@ -194,30 +231,8 @@ async function startDesktop() {
     "-always_inject",
     "-input", "KMBC",
   ], env, { critical: true });
-
-  // Do not announce the VM bridge before Chromium is actually available.
-  if (!(await probeCdp(30_000))) {
-    const browserProcesses = processes.filter((child) => {
-      const command = child.spawnargs?.[0] ?? "";
-      return command === chromium;
-    });
-    for (const child of browserProcesses) {
-      if (!child.killed) child.kill("SIGTERM");
-    }
-    throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
-  }
-
-  try {
-    await waitForPersistentProfile();
-  } catch (error) {
-    const browserProcesses = processes.filter((child) => (child.spawnargs?.[0] ?? "") === chromium);
-    for (const child of browserProcesses) {
-      if (!child.killed) child.kill("SIGTERM");
-    }
-    throw error;
-  }
+  await waitForPort("127.0.0.1", vncPort, 15_000);
 }
-
 function clampTimeoutSeconds(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.min(300, Math.max(1, parsed)) : 60;
