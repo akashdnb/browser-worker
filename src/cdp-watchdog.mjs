@@ -27,7 +27,7 @@ export async function cdpIsHealthy(endpoint = cdpEndpoint, timeoutMs = 1500) {
 
 function killChromium() {
   return new Promise((resolve) => {
-    const child = spawn("bash", ["-lc", "pkill -TERM -f '[c]hromium.*remote-debugging-port' || true"], {
+    const child = spawn("bash", ["-lc", "pkill -TERM -f '[c]hrom(e|ium).*remote-debugging-port' || true"], {
       stdio: ["ignore", "inherit", "inherit"],
     });
     const timer = setTimeout(() => {
