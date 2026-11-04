@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -u
 
+if [[ -n "${NO_PROXY:-}" ]]; then
+  export NO_PROXY="${NO_PROXY},127.0.0.1,localhost,::1"
+else
+  export NO_PROXY="127.0.0.1,localhost,::1"
+fi
+export no_proxy="$NO_PROXY"
+
 # BrowserMCP VM extension bootstrap runs as a Node preload before vm.js so
 # Chromium starts with the authoritative extension and authenticates it.
 
