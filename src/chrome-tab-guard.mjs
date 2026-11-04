@@ -1,3 +1,4 @@
+import { getCdpJson, getCdpResponse } from "./cdp-http.mjs";
 const cdpEndpoint = process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
 const maxTabs = Number.parseInt(process.env.CHROME_MAX_TABS ?? "15", 10);
 const intervalMs = Number.parseInt(process.env.CHROME_TAB_GUARD_INTERVAL_MS ?? "5000", 10);
@@ -17,20 +18,14 @@ const endpoint = cdpEndpoint.replace(/\/$/, "");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function listTabs() {
-  const response = await fetch(`${endpoint}/json/list`, {
-    signal: AbortSignal.timeout(2000),
-  });
-  if (!response.ok) throw new Error(`CDP /json/list returned HTTP ${response.status}`);
-  const targets = await response.json();
+  const targets = await getCdpJson(endpoint, "/json/list", { timeoutMs: 2000 });
   return Array.isArray(targets) ? targets.filter((target) => target?.type === "page" && target?.id) : [];
 }
 
 async function closeTab(target) {
-  const response = await fetch(`${endpoint}/json/close/${encodeURIComponent(target.id)}`, {
-    signal: AbortSignal.timeout(2000),
-  });
-  if (!response.ok) {
-    throw new Error(`failed to close tab ${target.id}: HTTP ${response.status}`);
+  const response = await getCdpResponse(endpoint, `/json/close/${encodeURIComponent(target.id)}`, { timeoutMs: 2000 });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw new Error(`failed to close tab ${target.id}: HTTP ${response.statusCode}`);
   }
 }
 
