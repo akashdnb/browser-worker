@@ -129,53 +129,70 @@ jobs:
             return 0
           }
 
+          restored=false
           if [ -n "$SOURCE_RUN_ID" ]; then
-            echo "Waiting for final profile artifact from worker run $SOURCE_RUN_ID"
-            restored=false
-            for attempt in $(seq 1 80); do
-              if restore_run "$SOURCE_RUN_ID"; then restored=true; break; fi
-              echo "Source profile artifact not available yet (attempt $attempt/80); waiting 15s"
-              rm -rf "$BROWSER_WORKER_PROFILE_DIR"
-              mkdir -p "$BROWSER_WORKER_PROFILE_DIR"
-              sleep 15
-            done
-            if [ "$restored" != "true" ]; then
-              echo "::error::Timed out waiting for the final profile artifact from run $SOURCE_RUN_ID"
-              exit 1
+            source_status="$(gh run view "$SOURCE_RUN_ID" --json status --jq '.status' 2>/dev/null || true)"
+            echo "Profile handoff source run $SOURCE_RUN_ID is $source_status"
+            if [ "$source_status" = "in_progress" ] || [ "$source_status" = "queued" ]; then
+              echo "Waiting briefly for the source run to publish its final profile"
+              for attempt in $(seq 1 20); do
+                if restore_run "$SOURCE_RUN_ID"; then restored=true; break; fi
+                source_status="$(gh run view "$SOURCE_RUN_ID" --json status --jq '.status' 2>/dev/null || true)"
+                if [ "$source_status" != "in_progress" ] && [ "$source_status" != "queued" ]; then
+                  echo "Source run became $source_status; switching to checkpoint recovery"
+                  break
+                fi
+                echo "Source profile artifact not available yet (attempt $attempt/20); waiting 15s"
+                sleep 15
+              done
+            elif [ "$source_status" = "completed" ]; then
+              restore_run "$SOURCE_RUN_ID" && restored=true || true
+            else
+              echo "::warning::Could not confirm source run state; attempting its final profile once"
+              restore_run "$SOURCE_RUN_ID" && restored=true || true
             fi
           else
             previous_run_ids="$(gh run list --workflow browser-worker.yml --status success --limit 20 --json databaseId --jq '.[].databaseId')"
-            restored=false
             while IFS= read -r previous_run_id; do
               [ -n "$previous_run_id" ] || continue
               if restore_run "$previous_run_id"; then restored=true; break; fi
             done <<< "$previous_run_ids"
-
-            if [ "$restored" != "true" ]; then
-              # A cancelled/killed worker may never publish its final profile
-              # artifact. In that case, recover the latest periodic checkpoint.
-              checkpoint_runs="$(gh run list --workflow browser-worker.yml --status completed --limit 30 --json databaseId --jq '.[].databaseId')"
-              while IFS= read -r previous_run_id; do
-                [ -n "$previous_run_id" ] || continue
-                checkpoint_dir="browser-worker-state/checkpoint-artifact"
-                rm -rf "$checkpoint_dir"
-                if gh run download "$previous_run_id" -n browser-worker-profile-checkpoint -D "$checkpoint_dir" 2>/dev/null &&
-                   restore_archive "$checkpoint_dir/browser-worker-profile.tar.gz"; then
-                  restored=true
-                  echo "Restored latest available periodic profile checkpoint from run $previous_run_id"
-                  break
-                fi
-              done <<< "$checkpoint_runs"
-            fi
-
-            if [ "$restored" != "true" ]; then
-              echo "::error::No valid final profile or periodic checkpoint was found. Refusing to start a blank profile."
-              exit 1
-            fi
           fi
 
-      - name: Install upstream Playwright MCP
-        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0
+          if [ "$restored" != "true" ]; then
+            # Cancelled/killed runs may never publish their final profile.
+            # Recover the latest valid periodic checkpoint instead of failing
+            # startup or launching an empty Chromium profile.
+            echo "Looking for the latest available periodic profile checkpoint"
+            checkpoint_runs="$(gh run list --workflow browser-worker.yml --status completed --limit 50 --json databaseId --jq '.[].databaseId')"
+            while IFS= read -r previous_run_id; do
+              [ -n "$previous_run_id" ] || continue
+              checkpoint_dir="browser-worker-state/checkpoint-artifact"
+              artifact_names="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run_id/artifacts" --paginate --jq '.artifacts | sort_by(.created_at) | reverse | .[].name' 2>/dev/null || true)"
+              while IFS= read -r artifact_name; do
+                case "$artifact_name" in
+                  browser-worker-profile-checkpoint*)
+                    rm -rf "$checkpoint_dir"
+                    if gh run download "$previous_run_id" -n "$artifact_name" -D "$checkpoint_dir" 2>/dev/null &&
+                       restore_archive "$checkpoint_dir/browser-worker-profile.tar.gz"; then
+                      restored=true
+                      echo "Restored periodic profile checkpoint $artifact_name from run $previous_run_id"
+                      break
+                    fi
+                    ;;
+                esac
+              done <<< "$artifact_names"
+              if [ "$restored" = "true" ]; then break; fi
+            done <<< "$checkpoint_runs"
+          fi
+
+          if [ "$restored" != "true" ]; then
+            echo "::error::No valid final profile or periodic checkpoint was found. Refusing to start a blank profile."
+            exit 1
+          fi
+
+      - name: Install upstream Playwright MCP and checkpoint uploader
+        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0 @actions/artifact@6.3.1
 
       - name: Install Chromium and OS dependencies
         run: npx playwright install --with-deps chromium
@@ -207,6 +224,7 @@ jobs:
           PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ github.workspace }}/browser-worker-state/live-profile
           BROWSER_WORKER_CHECKPOINT_DIR: ${{ github.workspace }}/browser-worker-state/live-checkpoint
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
+          BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
           WORKER_MAX_SECONDS: "19800"
