@@ -58,3 +58,47 @@ test("checkpoint is valid, omits locks/cache, and preserves live profile", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test("checkpoint runner stays alive for periodic saves until shutdown", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "profile-checkpoint-runner-"));
+  let child;
+  try {
+    const profile = await makeProfile(root);
+    const outputDir = path.join(root, "live-checkpoint");
+    child = spawn(
+      process.execPath,
+      [path.resolve("src/profile-checkpoint-runner.mjs")],
+      {
+        cwd: path.resolve("."),
+        env: {
+          ...process.env,
+          GITHUB_ACTIONS: "false",
+          PLAYWRIGHT_MCP_USER_DATA_DIR: profile,
+          BROWSER_WORKER_CHECKPOINT_DIR: outputDir,
+          BROWSER_WORKER_CHECKPOINT_SECONDS: "15",
+          BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "60",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { output += chunk.toString(); });
+    const exited = new Promise((resolve, reject) => {
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+      child.once("error", reject);
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(child.exitCode, null, `runner exited before its next interval: ${output}`);
+
+    child.kill("SIGTERM");
+    const result = await exited;
+    assert.equal(result.code, 0, `runner did not shut down cleanly: ${output}`);
+    assert.equal((await stat(path.join(outputDir, "browser-worker-profile.tar.gz"))).size > 0, true);
+  } finally {
+    if (child && child.exitCode === null) child.kill("SIGKILL");
+    await rm(root, { recursive: true, force: true });
+  }
+});
