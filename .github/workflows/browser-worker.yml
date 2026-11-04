@@ -192,7 +192,7 @@ jobs:
             # updated while the worker is running, so abrupt job cancellation
             # does not discard the latest browser profile.
             release_dir="browser-worker-state/release-artifact"
-            profile_assets="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^browser-worker-profile-[0-9]+\\.tar\\.gz\\.enc
+            profile_assets="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^browser-worker-profile-[0-9]+\.tar\.gz\.enc
 
           if [ "$restored" != "true" ]; then
             # Cancelled/killed runs may never publish their final profile.
@@ -388,7 +388,7 @@ jobs:
               fi
             done <<< "$profile_assets"
             if [ "$restored" = "true" ]; then
-              storage_asset="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^storage-state-[0-9]+\\.json\\.enc
+              storage_asset="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^storage-state-[0-9]+\.json\.enc
 
           if [ "$restored" != "true" ]; then
             # Cancelled/killed runs may never publish their final profile.
