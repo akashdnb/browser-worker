@@ -87,6 +87,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
         run: |
           export BROWSER_WORKER_PROFILE_DIR="$GITHUB_WORKSPACE/browser-worker-state/live-profile"
           mkdir -p browser-worker-state "$BROWSER_WORKER_PROFILE_DIR"
@@ -94,19 +96,35 @@ jobs:
 
           restore_archive() {
             local archive="$1"
+            local decrypted=""
             local extracted="$GITHUB_WORKSPACE/browser-worker-state/profile-restore"
+            if [[ "$archive" == *.enc ]]; then
+              decrypted="$GITHUB_WORKSPACE/browser-worker-state/profile-restore-archive.tar.gz"
+              rm -f "$decrypted"
+              if ! node src/profile-archive-crypto.mjs decrypt "$archive" "$decrypted"; then
+                echo "::warning::Could not decrypt profile archive"
+                return 1
+              fi
+              archive="$decrypted"
+            fi
             rm -rf "$extracted"
-            if [ ! -s "$archive" ]; then return 1; fi
-            if ! tar -tzf "$archive" | grep -Fx "browser-worker-profile/Local State" > /dev/null ||
+            if [ ! -s "$archive" ] ||
+               ! tar -tzf "$archive" | grep -Fx "browser-worker-profile/Local State" > /dev/null ||
                ! tar -tzf "$archive" | grep -Fx "browser-worker-profile/Default/Preferences" > /dev/null; then
               echo "::warning::Profile archive is missing Chromium metadata"
+              rm -f "$decrypted"
               return 1
             fi
             mkdir -p "$extracted"
-            if ! tar -xzf "$archive" -C "$extracted"; then rm -rf "$extracted"; return 1; fi
+            if ! tar -xzf "$archive" -C "$extracted"; then
+              rm -rf "$extracted"
+              rm -f "$decrypted"
+              return 1
+            fi
             if [ ! -s "$extracted/browser-worker-profile/Local State" ] ||
                [ ! -s "$extracted/browser-worker-profile/Default/Preferences" ]; then
               rm -rf "$extracted"
+              rm -f "$decrypted"
               return 1
             fi
             local cache_backup="$extracted/browser-worker-profile/Default/Service Worker/CacheStorage.preserved"
@@ -115,6 +133,7 @@ jobs:
             rm -rf "$BROWSER_WORKER_PROFILE_DIR"
             mv "$extracted/browser-worker-profile" "$BROWSER_WORKER_PROFILE_DIR"
             rm -rf "$extracted"
+            rm -f "$decrypted"
             echo "Restored Chromium profile"
             return 0
           }
@@ -124,8 +143,15 @@ jobs:
             local artifact_dir="browser-worker-state/profile-artifact"
             rm -rf "$artifact_dir"
             if ! gh run download "$run_id" -n browser-worker-profile -D "$artifact_dir" 2>/dev/null; then return 1; fi
-            restore_archive "$artifact_dir/browser-worker-profile.tar.gz" || return 1
-            gh run download "$run_id" -n browser-worker-state -D browser-worker-state 2>/dev/null || true
+            local profile_archive="$artifact_dir/browser-worker-profile.tar.gz.enc"
+            if [ ! -s "$profile_archive" ]; then profile_archive="$artifact_dir/browser-worker-profile.tar.gz"; fi
+            restore_archive "$profile_archive" || return 1
+            if gh run download "$run_id" -n browser-worker-state -D browser-worker-state 2>/dev/null; then
+              if [ -s "browser-worker-state/storage-state.json.enc" ]; then
+                node src/profile-archive-crypto.mjs decrypt \
+                  "browser-worker-state/storage-state.json.enc" "browser-worker-state/storage-state.json" || return 1
+              fi
+            fi
             return 0
           }
 
@@ -152,7 +178,9 @@ jobs:
               restore_run "$SOURCE_RUN_ID" && restored=true || true
             fi
           else
-            previous_run_ids="$(gh run list --workflow browser-worker.yml --status success --limit 20 --json databaseId --jq '.[].databaseId')"
+            # A cancelled worker may still publish its final profile from an always() step.
+            # Check every completed run, not only successful runs, before checkpoint fallback.
+            previous_run_ids="$(gh run list --workflow browser-worker.yml --status completed --limit 50 --json databaseId --jq '.[].databaseId')"
             while IFS= read -r previous_run_id; do
               [ -n "$previous_run_id" ] || continue
               if restore_run "$previous_run_id"; then restored=true; break; fi
@@ -173,8 +201,11 @@ jobs:
                 case "$artifact_name" in
                   browser-worker-profile-checkpoint*)
                     rm -rf "$checkpoint_dir"
-                    if gh run download "$previous_run_id" -n "$artifact_name" -D "$checkpoint_dir" 2>/dev/null &&
-                       restore_archive "$checkpoint_dir/browser-worker-profile.tar.gz"; then
+                    checkpoint_archive="$checkpoint_dir/browser-worker-profile.tar.gz.enc"
+                    if gh run download "$previous_run_id" -n "$artifact_name" -D "$checkpoint_dir" 2>/dev/null; then
+                      if [ ! -s "$checkpoint_archive" ]; then checkpoint_archive="$checkpoint_dir/browser-worker-profile.tar.gz"; fi
+                    fi
+                    if [ -s "$checkpoint_archive" ] && restore_archive "$checkpoint_archive"; then
                       restored=true
                       echo "Restored periodic profile checkpoint $artifact_name from run $previous_run_id"
                       break
