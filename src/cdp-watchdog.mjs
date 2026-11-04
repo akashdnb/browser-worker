@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { getCdpResponse } from "./cdp-http.mjs";
 
 const cdpEndpoint = process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
 const checkIntervalMs = Number.parseInt(process.env.CDP_WATCHDOG_INTERVAL_MS ?? "10000", 10);
@@ -14,12 +15,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function cdpIsHealthy(endpoint = cdpEndpoint, timeoutMs = 1500) {
   try {
-    const response = await fetch(`${endpoint.replace(/\/$/, "")}/json/version`, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok) return false;
-    await response.text();
-    return true;
+    const response = await getCdpResponse(endpoint, "/json/version", { timeoutMs });
+    return response.statusCode === 200;
   } catch {
     return false;
   }
