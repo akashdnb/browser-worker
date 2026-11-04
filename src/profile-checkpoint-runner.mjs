@@ -65,7 +65,7 @@ async function pruneReleaseAssets(prefix, keep = 3) {
   const output = await run("gh", [
     "release", "view", releaseTag, "--json", "assets", "--jq", ".assets[].name",
   ], { captureStdout: true });
-  const names = output.split(/\\r?\\n/).filter((name) => name.startsWith(`${prefix}-`)).sort().reverse();
+  const names = output.split(/\r?\n/).filter((name) => name.startsWith(`${prefix}-`)).sort().reverse();
   for (const name of names.slice(keep)) {
     try {
       await run("gh", ["release", "delete-asset", releaseTag, name, "--yes"]);
