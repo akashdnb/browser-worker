@@ -23,14 +23,19 @@ if (!Number.isInteger(uploadSeconds) || uploadSeconds < 60 || uploadSeconds > 36
   throw new Error("BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS must be between 60 and 3600");
 }
 
-function run(command, args) {
+function run(command, args, { captureStdout = false } = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, {
+      env: process.env,
+      stdio: ["ignore", captureStdout ? "pipe" : "ignore", "pipe"],
+    });
+    let stdout = "";
     let stderr = "";
+    if (captureStdout) child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
-      if (code === 0) resolvePromise();
+      if (code === 0) resolvePromise(stdout);
       else reject(new Error(`${command} exited with code=${code}, signal=${signal}: ${stderr.slice(-2000)}`));
     });
   });
@@ -56,9 +61,28 @@ async function ensureRelease() {
   releaseReady = true;
 }
 
-async function uploadEncryptedAsset(filePath) {
+async function pruneReleaseAssets(prefix, keep = 3) {
+  const output = await run("gh", [
+    "release", "view", releaseTag, "--json", "assets", "--jq", ".assets[].name",
+  ], { captureStdout: true });
+  const names = output.split(/\\r?\\n/).filter((name) => name.startsWith(`${prefix}-`)).sort().reverse();
+  for (const name of names.slice(keep)) {
+    try {
+      await run("gh", ["release", "delete-asset", releaseTag, name, "--yes"]);
+    } catch (error) {
+      console.warn("Could not prune old encrypted profile asset:", error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
+async function uploadEncryptedAsset(filePath, prefix, suffix) {
   await ensureRelease();
-  await run("gh", ["release", "upload", releaseTag, filePath, "--clobber"]);
+  const assetName = `${prefix}-${Date.now()}${suffix}`;
+  const assetPath = path.join(artifactDir, assetName);
+  await copyFile(filePath, assetPath);
+  await run("gh", ["release", "upload", releaseTag, assetPath]);
+  await pruneReleaseAssets(prefix);
+  return assetName;
 }
 
 let stopping = false;
@@ -98,14 +122,14 @@ async function publishCheckpoint() {
       const encryptedArchivePath = `${archivePath}.enc`;
       await encryptFile(archivePath, encryptedArchivePath, secrets[0]);
       const artifactName = `browser-worker-profile-checkpoint-${Date.now()}`;
-      await uploadEncryptedAsset(encryptedArchivePath);
+      await uploadEncryptedAsset(encryptedArchivePath, "browser-worker-profile", ".tar.gz.enc");
       const storageStatePath = process.env.BROWSER_WORKER_STATE_FILE;
       if (storageStatePath) {
         try {
           await stat(storageStatePath);
           const encryptedStorageStatePath = `${storageStatePath}.enc`;
           await encryptFile(storageStatePath, encryptedStorageStatePath, secrets[0]);
-          await uploadEncryptedAsset(encryptedStorageStatePath);
+          await uploadEncryptedAsset(encryptedStorageStatePath, "storage-state", ".json.enc");
         } catch (error) {
           if (error?.code !== "ENOENT") throw error;
         }
