@@ -72,7 +72,7 @@ async function waitForPort(host, port, timeoutMs = 20_000) {
   throw new Error(`Timed out waiting for ${host}:${port}`);
 }
 
-async function probeCdp(timeoutMs = 60_000) {
+async function probeCdp(timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "no response";
   const endpoint = `http://127.0.0.1:${cdpPort}`;
@@ -203,7 +203,7 @@ async function startDesktop() {
 
   // Start VNC only after the display and browser are confirmed. A transient
   // x11vnc startup failure must not kill Chromium while CDP is booting.
-  if (!(await probeCdp(30_000))) {
+  if (!(await probeCdp(120_000))) {
     await killStaleChromium();
     throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
   }
