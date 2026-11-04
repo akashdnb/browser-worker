@@ -2,6 +2,8 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 import { createReadStream, createWriteStream } from "node:fs";
 import { appendFile, open, rm, writeFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HEADER_LIMIT = 4096;
 const AUTH_TAG_BYTES = 16;
@@ -105,8 +107,8 @@ export async function decryptFile(inputPath, outputPath, secrets) {
   throw new Error("Could not decrypt browser profile artifact with the configured key(s)", { cause: lastError });
 }
 
-const [operation, inputPath, outputPath] = process.argv.slice(2);
-if (operation) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const [operation, inputPath, outputPath] = process.argv.slice(2);
   if (!["encrypt", "decrypt"].includes(operation) || !inputPath || !outputPath) {
     throw new Error("Usage: node src/profile-archive-crypto.mjs <encrypt|decrypt> <input> <output>");
   }
