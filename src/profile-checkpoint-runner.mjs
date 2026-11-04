@@ -1,6 +1,5 @@
 import { mkdir, copyFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DefaultArtifactClient } from "@actions/artifact";
 import { createProfileCheckpoint, profileIsReady } from "./profile-checkpoint.mjs";
 import { encryptFile, profileEncryptionSecrets } from "./profile-archive-crypto.mjs";
 
@@ -8,7 +7,11 @@ const profileDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? process.env.BROWS
 const artifactDir = process.env.BROWSER_WORKER_CHECKPOINT_DIR;
 const checkpointSeconds = Number.parseInt(process.env.BROWSER_WORKER_CHECKPOINT_SECONDS ?? "60", 10);
 const uploadSeconds = Number.parseInt(process.env.BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS ?? "900", 10);
-const artifactClient = process.env.GITHUB_ACTIONS === "true" ? new DefaultArtifactClient() : null;
+let artifactClient = null;
+if (process.env.GITHUB_ACTIONS === "true") {
+  const { DefaultArtifactClient } = await import("@actions/artifact");
+  artifactClient = new DefaultArtifactClient();
+}
 let lastUploadedAt = 0;
 
 if (!profileDir || !artifactDir) {
