@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import WebSocket from "ws";
+import { getCdpJson } from "./cdp-http.mjs";
 
 const realChromium = process.env.BROWSER_MCP_REAL_CHROMIUM;
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, "");
@@ -92,9 +93,7 @@ async function installIfChanged(payload) {
 }
 
 async function fetchCdpJson(path) {
-  const response = await fetch(`http://127.0.0.1:${cdpPort}${path}`, { signal: AbortSignal.timeout(5000) });
-  if (!response.ok) throw new Error(`CDP endpoint ${path} returned HTTP ${response.status}`);
-  return await response.json();
+  return await getCdpJson(`http://127.0.0.1:${cdpPort}`, path, { timeoutMs: 5000 });
 }
 
 async function waitForCdp(timeoutMs = 60_000) {

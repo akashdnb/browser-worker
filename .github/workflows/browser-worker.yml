@@ -298,6 +298,8 @@ jobs:
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
+          NO_PROXY: "127.0.0.1,localhost,::1"
+          no_proxy: "127.0.0.1,localhost,::1"
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
           WORKER_MAX_SECONDS: "19800"
           WORKER_RENEWAL_LEAD_SECONDS: "900"

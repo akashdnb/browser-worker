@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
+import { getCdpResponse } from "./cdp-http.mjs";
 import { monitorProcessExit } from "./process-monitor.js";
 
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, "");
@@ -73,20 +74,18 @@ async function waitForPort(host, port, timeoutMs = 20_000) {
 
 async function probeCdp(timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
-  let lastError = "unknown error";
+  let lastError = "no response";
+  const endpoint = `http://127.0.0.1:${cdpPort}`;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
-        signal: AbortSignal.timeout(1500),
-      });
-      if (response.ok) {
-        const body = await response.text();
-        console.log(`Chromium CDP ready on 127.0.0.1:${cdpPort}: ${body.slice(0, 500)}`);
+      const response = await getCdpResponse(endpoint, "/json/version", { timeoutMs: 1500 });
+      if (response.statusCode === 200) {
+        console.log(`Chromium CDP ready on 127.0.0.1:${cdpPort}: ${response.body.slice(0, 500)}`);
         return true;
       }
-      lastError = `HTTP ${response.status}`;
+      lastError = `HTTP ${response.statusCode}: ${response.body.slice(0, 300)}`;
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+      lastError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     }
     await sleep(500);
   }
