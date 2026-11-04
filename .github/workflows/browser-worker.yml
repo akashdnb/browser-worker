@@ -222,6 +222,16 @@ jobs:
             exit 1
           fi
 
+      - name: Remove legacy unencrypted profile artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact_ids="$(gh api --paginate --jq '.artifacts[] | select(.name == "browser-worker-profile" or .name == "browser-worker-state" or .name == "browser-worker-profile-checkpoint" or (.name | startswith("browser-worker-profile-checkpoint-"))) | .id' "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" 2>/dev/null || true)"
+          while IFS= read -r artifact_id; do
+            [ -n "$artifact_id" ] || continue
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" >/dev/null 2>&1 || true
+          done <<< "$artifact_ids"
+
       - name: Install upstream Playwright MCP and checkpoint uploader
         run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0 @actions/artifact@6.3.1
 
@@ -249,6 +259,7 @@ jobs:
         env:
           UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
           BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
@@ -297,44 +308,63 @@ jobs:
 
           node src/worker.js
 
-      - name: Prepare browser profile artifact
+      - name: Prepare and encrypt browser profile artifacts
         if: ${{ always() }}
+        env:
+          UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
         run: |
           profile_dir="$BROWSER_WORKER_PROFILE_DIR"
+          profile_ready=true
           if [ ! -d "$profile_dir" ] || [ ! -s "$profile_dir/Local State" ] || [ ! -s "$profile_dir/Default/Preferences" ]; then
             echo "::error::Chromium profile is missing or empty; refusing to publish a blank snapshot"
-            exit 1
+            profile_ready=false
+          else
+            node --input-type=module -e '
+              import { createProfileCheckpoint } from "./src/profile-checkpoint.mjs";
+              await createProfileCheckpoint({ profileDir: process.env.BROWSER_WORKER_PROFILE_DIR, outputDir: process.cwd() });
+            '
+            node src/profile-archive-crypto.mjs encrypt browser-worker-profile.tar.gz browser-worker-profile.tar.gz.enc
+            rm -f browser-worker-profile.tar.gz
+            ls -lh browser-worker-profile.tar.gz.enc
           fi
 
-          node --input-type=module -e '
-            import { createProfileCheckpoint } from "./src/profile-checkpoint.mjs";
-            await createProfileCheckpoint({ profileDir: process.env.BROWSER_WORKER_PROFILE_DIR, outputDir: process.cwd() });
-          '
-          ls -lh browser-worker-profile.tar.gz
+          checkpoint_archive="browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz"
+          if [ -s "$checkpoint_archive" ]; then
+            node src/profile-archive-crypto.mjs encrypt "$checkpoint_archive" "$checkpoint_archive.enc"
+          fi
+
+          storage_state="browser-worker-state/storage-state.json"
+          if [ -s "$storage_state" ]; then
+            node src/profile-archive-crypto.mjs encrypt "$storage_state" "$storage_state.enc"
+            rm -f "$storage_state"
+          fi
+
+          if [ "$profile_ready" != "true" ]; then exit 1; fi
 
       - name: Upload browser profile
-        if: ${{ always() && hashFiles('browser-worker-profile.tar.gz') != '' }}
+        if: ${{ always() && hashFiles('browser-worker-profile.tar.gz.enc') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: browser-worker-profile
-          path: browser-worker-profile.tar.gz
+          path: browser-worker-profile.tar.gz.enc
           retention-days: 90
           overwrite: true
 
-      - name: Upload latest checkpoint archive
-        if: ${{ always() && hashFiles('browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz') != '' }}
+      - name: Upload latest encrypted checkpoint archive
+        if: ${{ always() && hashFiles('browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz.enc') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: browser-worker-profile-checkpoint
-          path: browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz
+          path: browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz.enc
           retention-days: 90
           overwrite: true
 
-      - name: Upload browser storage state
-        if: ${{ always() && hashFiles('browser-worker-state/storage-state.json') != '' }}
+      - name: Upload encrypted browser storage state
+        if: ${{ always() && hashFiles('browser-worker-state/storage-state.json.enc') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: browser-worker-state
-          path: browser-worker-state/storage-state.json
+          path: browser-worker-state/storage-state.json.enc
           retention-days: 90
           overwrite: true
