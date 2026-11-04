@@ -168,13 +168,21 @@ jobs:
             while IFS= read -r previous_run_id; do
               [ -n "$previous_run_id" ] || continue
               checkpoint_dir="browser-worker-state/checkpoint-artifact"
-              rm -rf "$checkpoint_dir"
-              if gh run download "$previous_run_id" -n browser-worker-profile-checkpoint -D "$checkpoint_dir" 2>/dev/null &&
-                 restore_archive "$checkpoint_dir/browser-worker-profile.tar.gz"; then
-                restored=true
-                echo "Restored latest available periodic profile checkpoint from run $previous_run_id"
-                break
-              fi
+              artifact_names="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run_id/artifacts" --paginate --jq '.artifacts | sort_by(.created_at) | reverse | .[].name' 2>/dev/null || true)"
+              while IFS= read -r artifact_name; do
+                case "$artifact_name" in
+                  browser-worker-profile-checkpoint*)
+                    rm -rf "$checkpoint_dir"
+                    if gh run download "$previous_run_id" -n "$artifact_name" -D "$checkpoint_dir" 2>/dev/null &&
+                       restore_archive "$checkpoint_dir/browser-worker-profile.tar.gz"; then
+                      restored=true
+                      echo "Restored periodic profile checkpoint $artifact_name from run $previous_run_id"
+                      break
+                    fi
+                    ;;
+                esac
+              done <<< "$artifact_names"
+              if [ "$restored" = "true" ]; then break; fi
             done <<< "$checkpoint_runs"
           fi
 
@@ -183,8 +191,8 @@ jobs:
             exit 1
           fi
 
-      - name: Install upstream Playwright MCP
-        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0
+      - name: Install upstream Playwright MCP and checkpoint uploader
+        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0 @actions/artifact@6.3.1
 
       - name: Install Chromium and OS dependencies
         run: npx playwright install --with-deps chromium
@@ -216,6 +224,7 @@ jobs:
           PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ github.workspace }}/browser-worker-state/live-profile
           BROWSER_WORKER_CHECKPOINT_DIR: ${{ github.workspace }}/browser-worker-state/live-checkpoint
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
+          BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
           WORKER_MAX_SECONDS: "19800"
