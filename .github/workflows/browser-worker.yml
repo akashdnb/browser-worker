@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
@@ -188,6 +188,25 @@ jobs:
           fi
 
           if [ "$restored" != "true" ]; then
+            # The private draft release is the durable checkpoint store. It is
+            # updated while the worker is running, so abrupt job cancellation
+            # does not discard the latest browser profile.
+            release_dir="browser-worker-state/release-artifact"
+            rm -rf "$release_dir"
+            mkdir -p "$release_dir"
+            if gh release download browser-worker-state --pattern "browser-worker-profile.tar.gz.enc" --dir "$release_dir" --clobber 2>/dev/null &&
+               restore_archive "$release_dir/browser-worker-profile.tar.gz.enc"; then
+              restored=true
+              if gh release download browser-worker-state --pattern "storage-state.json.enc" --dir "$release_dir" --clobber 2>/dev/null &&
+                 [ -s "$release_dir/storage-state.json.enc" ]; then
+                node src/profile-archive-crypto.mjs decrypt \
+                  "$release_dir/storage-state.json.enc" "browser-worker-state/storage-state.json" || true
+              fi
+              echo "Restored latest encrypted profile checkpoint from the private draft release"
+            fi
+          fi
+
+          if [ "$restored" != "true" ]; then
             # Cancelled/killed runs may never publish their final profile.
             # Recover the latest valid periodic checkpoint instead of failing
             # startup or launching an empty Chromium profile.
@@ -232,8 +251,8 @@ jobs:
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" >/dev/null 2>&1 || true
           done <<< "$artifact_ids"
 
-      - name: Install upstream Playwright MCP and checkpoint uploader
-        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0 @actions/artifact@6.3.1
+      - name: Install upstream Playwright MCP
+        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0
 
       - name: Install Chromium and OS dependencies
         run: npx playwright install --with-deps chromium
@@ -272,6 +291,7 @@ jobs:
           WORKER_MAX_SECONDS: "19800"
           WORKER_RENEWAL_LEAD_SECONDS: "900"
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           VM_WORKER_ID: github-${{ github.run_id }}
           VM_CHROMIUM_DEBUG_PORT: "9222"
           DISPLAY: ":99"
