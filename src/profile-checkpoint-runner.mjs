@@ -2,6 +2,7 @@ import { mkdir, copyFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DefaultArtifactClient } from "@actions/artifact";
 import { createProfileCheckpoint, profileIsReady } from "./profile-checkpoint.mjs";
+import { encryptFile, profileEncryptionSecrets } from "./profile-archive-crypto.mjs";
 
 const profileDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? process.env.BROWSER_WORKER_PROFILE_DIR;
 const artifactDir = process.env.BROWSER_WORKER_CHECKPOINT_DIR;
@@ -52,10 +53,14 @@ async function publishCheckpoint() {
     console.log(`Chromium profile checkpoint saved at ${details.savedAt} (${details.bytes} bytes)`);
 
     if (artifactClient && (lastUploadedAt === 0 || Date.now() - lastUploadedAt >= uploadSeconds * 1000)) {
+      const secrets = profileEncryptionSecrets();
+      if (!secrets.length) throw new Error("Browser profile encryption key is not configured");
+      const encryptedArchivePath = `${archivePath}.enc`;
+      await encryptFile(archivePath, encryptedArchivePath, secrets[0]);
       const artifactName = `browser-worker-profile-checkpoint-${Date.now()}`;
       const result = await artifactClient.uploadArtifact(
         artifactName,
-        [archivePath],
+        [encryptedArchivePath],
         artifactDir,
         { retentionDays: 90 },
       );
