@@ -191,7 +191,31 @@ jobs:
             # The private draft release is updated while the worker is running,
             # so abrupt job cancellation does not discard the latest profile.
             release_dir="browser-worker-state/release-artifact"
-            profile_assets="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^browser-worker-profile-[0-9]+\.tar\.gz\.enc
+            profile_assets="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^browser-worker-profile-[0-9]+[.]tar[.]gz[.]enc' | sort -r || true)"
+            while IFS= read -r profile_asset; do
+              [ -n "$profile_asset" ] || continue
+              rm -rf "$release_dir"
+              mkdir -p "$release_dir"
+              if gh release download browser-worker-state --pattern "$profile_asset" --dir "$release_dir" 2>/dev/null &&
+                 restore_archive "$release_dir/$profile_asset"; then
+                restored=true
+                break
+              fi
+            done <<< "$profile_assets"
+            if [ "$restored" = "true" ]; then
+              storage_asset="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^storage-state-[0-9]+[.]json[.]enc' | sort -r | head -n 1 || true)"
+              if [ -n "$storage_asset" ] &&
+                 gh release download browser-worker-state --pattern "$storage_asset" --dir "$release_dir" 2>/dev/null &&
+                 [ -s "$release_dir/$storage_asset" ]; then
+                node src/profile-archive-crypto.mjs decrypt \
+                  "$release_dir/$storage_asset" "browser-worker-state/storage-state.json" || true
+              fi
+              echo "Restored latest encrypted profile checkpoint from the private draft release"
+            fi
+          fi
+
+          if [ "$restored" != "true" ]; then
+            # Cancelled/killed runs may never publish their final profile.
             # Recover the latest valid periodic checkpoint instead of failing
             # startup or launching an empty Chromium profile.
             echo "Looking for the latest available periodic profile checkpoint"
@@ -367,323 +391,5 @@ jobs:
         with:
           name: browser-worker-state
           path: browser-worker-state/storage-state.json.enc
-          retention-days: 90
-          overwrite: true
- | sort -r || true)"
-            while IFS= read -r profile_asset; do
-              [ -n "$profile_asset" ] || continue
-              rm -rf "$release_dir"
-              mkdir -p "$release_dir"
-              if gh release download browser-worker-state --pattern "$profile_asset" --dir "$release_dir" 2>/dev/null &&
-                 restore_archive "$release_dir/$profile_asset"; then
-                restored=true
-                break
-              fi
-            done <<< "$profile_assets"
-            if [ "$restored" = "true" ]; then
-              storage_asset="$(gh release view browser-worker-state --json assets --jq '.assets[].name' 2>/dev/null | grep -E '^storage-state-[0-9]+\.json\.enc
-            # Recover the latest valid periodic checkpoint instead of failing
-            # startup or launching an empty Chromium profile.
-            echo "Looking for the latest available periodic profile checkpoint"
-            checkpoint_runs="$(gh run list --workflow browser-worker.yml --status completed --limit 50 --json databaseId --jq '.[].databaseId')"
-            while IFS= read -r previous_run_id; do
-              [ -n "$previous_run_id" ] || continue
-              checkpoint_dir="browser-worker-state/checkpoint-artifact"
-              artifact_names="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run_id/artifacts" --paginate --jq '.artifacts | sort_by(.created_at) | reverse | .[].name' 2>/dev/null || true)"
-              while IFS= read -r artifact_name; do
-                case "$artifact_name" in
-                  browser-worker-profile-checkpoint*)
-                    rm -rf "$checkpoint_dir"
-                    if gh run download "$previous_run_id" -n "$artifact_name" -D "$checkpoint_dir" 2>/dev/null &&
-                       restore_archive "$checkpoint_dir/browser-worker-profile.tar.gz"; then
-                      restored=true
-                      echo "Restored periodic profile checkpoint $artifact_name from run $previous_run_id"
-                      break
-                    fi
-                    ;;
-                esac
-              done <<< "$artifact_names"
-              if [ "$restored" = "true" ]; then break; fi
-            done <<< "$checkpoint_runs"
-          fi
-
-          if [ "$restored" != "true" ]; then
-            echo "::error::No valid final profile or periodic checkpoint was found. Refusing to start a blank profile."
-            exit 1
-          fi
-
-      - name: Install upstream Playwright MCP and checkpoint uploader
-        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0 @actions/artifact@6.3.1
-
-      - name: Install Chromium and OS dependencies
-        run: npx playwright install --with-deps chromium
-
-      - name: Resolve Chromium executable
-        run: |
-          chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
-          test -n "$chromium_bin"
-          echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
-          echo "Using shared interactive Chromium at $chromium_bin"
-
-      - name: Stop older worker runs after a push deployment
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        run: |
-          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 20 --json databaseId --jq '.[].databaseId'); do
-            if [ "$run_id" != "$CURRENT_RUN_ID" ]; then gh run cancel "$run_id" || true; fi
-          done
-
-      - name: Run browser worker and interactive desktop
-        env:
-          UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
-          UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
-          BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
-          PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
-          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ github.workspace }}/browser-worker-state/live-profile
-          BROWSER_WORKER_CHECKPOINT_DIR: ${{ github.workspace }}/browser-worker-state/live-checkpoint
-          BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
-          BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
-          PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
-          PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
-          WORKER_MAX_SECONDS: "19800"
-          WORKER_RENEWAL_LEAD_SECONDS: "900"
-          GITHUB_TOKEN: ${{ github.token }}
-          VM_WORKER_ID: github-${{ github.run_id }}
-          VM_CHROMIUM_DEBUG_PORT: "9222"
-          DISPLAY: ":99"
-        run: |
-          test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
-          test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
-          test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
-          test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
-
-          bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
-          vm_pid=$!
-          node src/profile-checkpoint-runner.mjs &
-          checkpoint_pid=$!
-          trap 'kill "$vm_pid" "$checkpoint_pid" 2>/dev/null || true; wait "$vm_pid" "$checkpoint_pid" 2>/dev/null || true' EXIT
-
-          for attempt in $(seq 1 300); do
-            if grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
-              echo "Interactive VM relay is connected"
-              break
-            fi
-            if ! kill -0 "$vm_pid" 2>/dev/null; then
-              echo "::error::Interactive VM supervisor exited during startup"
-              cat "$RUNNER_TEMP/interactive-vm.log"
-              exit 1
-            fi
-            sleep 1
-          done
-
-          if ! grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
-            echo "::error::Interactive VM relay did not connect to utils within 5 minutes"
-            cat "$RUNNER_TEMP/interactive-vm.log"
-            exit 1
-          fi
-
-          node src/worker.js
-
-      - name: Prepare browser profile artifact
-        if: ${{ always() }}
-        run: |
-          profile_dir="$BROWSER_WORKER_PROFILE_DIR"
-          if [ ! -d "$profile_dir" ] || [ ! -s "$profile_dir/Local State" ] || [ ! -s "$profile_dir/Default/Preferences" ]; then
-            echo "::error::Chromium profile is missing or empty; refusing to publish a blank snapshot"
-            exit 1
-          fi
-
-          node --input-type=module -e '
-            import { createProfileCheckpoint } from "./src/profile-checkpoint.mjs";
-            await createProfileCheckpoint({ profileDir: process.env.BROWSER_WORKER_PROFILE_DIR, outputDir: process.cwd() });
-          '
-          ls -lh browser-worker-profile.tar.gz
-
-      - name: Upload browser profile
-        if: ${{ always() && hashFiles('browser-worker-profile.tar.gz') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-worker-profile
-          path: browser-worker-profile.tar.gz
-          retention-days: 90
-          overwrite: true
-
-      - name: Upload latest checkpoint archive
-        if: ${{ always() && hashFiles('browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-worker-profile-checkpoint
-          path: browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz
-          retention-days: 90
-          overwrite: true
-
-      - name: Upload browser storage state
-        if: ${{ always() && hashFiles('browser-worker-state/storage-state.json') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-worker-state
-          path: browser-worker-state/storage-state.json
-          retention-days: 90
-          overwrite: true
- | sort -r | head -n 1 || true)"
-              if [ -n "$storage_asset" ] &&
-                 gh release download browser-worker-state --pattern "$storage_asset" --dir "$release_dir" 2>/dev/null &&
-                 [ -s "$release_dir/$storage_asset" ]; then
-                node src/profile-archive-crypto.mjs decrypt \
-                  "$release_dir/$storage_asset" "browser-worker-state/storage-state.json" || true
-              fi
-              echo "Restored latest encrypted profile checkpoint from the private draft release"
-            fi
-          fi
-
-          if [ "$restored" != "true" ]; then
-            # Cancelled/killed runs may never publish their final profile.
-            # Recover the latest valid periodic checkpoint instead of failing
-            # startup or launching an empty Chromium profile.
-            echo "Looking for the latest available periodic profile checkpoint"
-            checkpoint_runs="$(gh run list --workflow browser-worker.yml --status completed --limit 50 --json databaseId --jq '.[].databaseId')"
-            while IFS= read -r previous_run_id; do
-              [ -n "$previous_run_id" ] || continue
-              checkpoint_dir="browser-worker-state/checkpoint-artifact"
-              artifact_names="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run_id/artifacts" --paginate --jq '.artifacts | sort_by(.created_at) | reverse | .[].name' 2>/dev/null || true)"
-              while IFS= read -r artifact_name; do
-                case "$artifact_name" in
-                  browser-worker-profile-checkpoint*)
-                    rm -rf "$checkpoint_dir"
-                    if gh run download "$previous_run_id" -n "$artifact_name" -D "$checkpoint_dir" 2>/dev/null &&
-                       restore_archive "$checkpoint_dir/browser-worker-profile.tar.gz"; then
-                      restored=true
-                      echo "Restored periodic profile checkpoint $artifact_name from run $previous_run_id"
-                      break
-                    fi
-                    ;;
-                esac
-              done <<< "$artifact_names"
-              if [ "$restored" = "true" ]; then break; fi
-            done <<< "$checkpoint_runs"
-          fi
-
-          if [ "$restored" != "true" ]; then
-            echo "::error::No valid final profile or periodic checkpoint was found. Refusing to start a blank profile."
-            exit 1
-          fi
-
-      - name: Install upstream Playwright MCP and checkpoint uploader
-        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0 @actions/artifact@6.3.1
-
-      - name: Install Chromium and OS dependencies
-        run: npx playwright install --with-deps chromium
-
-      - name: Resolve Chromium executable
-        run: |
-          chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
-          test -n "$chromium_bin"
-          echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
-          echo "Using shared interactive Chromium at $chromium_bin"
-
-      - name: Stop older worker runs after a push deployment
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        run: |
-          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 20 --json databaseId --jq '.[].databaseId'); do
-            if [ "$run_id" != "$CURRENT_RUN_ID" ]; then gh run cancel "$run_id" || true; fi
-          done
-
-      - name: Run browser worker and interactive desktop
-        env:
-          UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
-          UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
-          BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
-          PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
-          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ github.workspace }}/browser-worker-state/live-profile
-          BROWSER_WORKER_CHECKPOINT_DIR: ${{ github.workspace }}/browser-worker-state/live-checkpoint
-          BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
-          BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
-          PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
-          PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
-          WORKER_MAX_SECONDS: "19800"
-          WORKER_RENEWAL_LEAD_SECONDS: "900"
-          GITHUB_TOKEN: ${{ github.token }}
-          VM_WORKER_ID: github-${{ github.run_id }}
-          VM_CHROMIUM_DEBUG_PORT: "9222"
-          DISPLAY: ":99"
-        run: |
-          test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
-          test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
-          test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
-          test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
-
-          bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
-          vm_pid=$!
-          node src/profile-checkpoint-runner.mjs &
-          checkpoint_pid=$!
-          trap 'kill "$vm_pid" "$checkpoint_pid" 2>/dev/null || true; wait "$vm_pid" "$checkpoint_pid" 2>/dev/null || true' EXIT
-
-          for attempt in $(seq 1 300); do
-            if grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
-              echo "Interactive VM relay is connected"
-              break
-            fi
-            if ! kill -0 "$vm_pid" 2>/dev/null; then
-              echo "::error::Interactive VM supervisor exited during startup"
-              cat "$RUNNER_TEMP/interactive-vm.log"
-              exit 1
-            fi
-            sleep 1
-          done
-
-          if ! grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
-            echo "::error::Interactive VM relay did not connect to utils within 5 minutes"
-            cat "$RUNNER_TEMP/interactive-vm.log"
-            exit 1
-          fi
-
-          node src/worker.js
-
-      - name: Prepare browser profile artifact
-        if: ${{ always() }}
-        run: |
-          profile_dir="$BROWSER_WORKER_PROFILE_DIR"
-          if [ ! -d "$profile_dir" ] || [ ! -s "$profile_dir/Local State" ] || [ ! -s "$profile_dir/Default/Preferences" ]; then
-            echo "::error::Chromium profile is missing or empty; refusing to publish a blank snapshot"
-            exit 1
-          fi
-
-          node --input-type=module -e '
-            import { createProfileCheckpoint } from "./src/profile-checkpoint.mjs";
-            await createProfileCheckpoint({ profileDir: process.env.BROWSER_WORKER_PROFILE_DIR, outputDir: process.cwd() });
-          '
-          ls -lh browser-worker-profile.tar.gz
-
-      - name: Upload browser profile
-        if: ${{ always() && hashFiles('browser-worker-profile.tar.gz') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-worker-profile
-          path: browser-worker-profile.tar.gz
-          retention-days: 90
-          overwrite: true
-
-      - name: Upload latest checkpoint archive
-        if: ${{ always() && hashFiles('browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-worker-profile-checkpoint
-          path: browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz
-          retention-days: 90
-          overwrite: true
-
-      - name: Upload browser storage state
-        if: ${{ always() && hashFiles('browser-worker-state/storage-state.json') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-worker-state
-          path: browser-worker-state/storage-state.json
           retention-days: 90
           overwrite: true
