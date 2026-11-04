@@ -9,6 +9,9 @@ const artifactDir = process.env.BROWSER_WORKER_CHECKPOINT_DIR;
 const checkpointSeconds = Number.parseInt(process.env.BROWSER_WORKER_CHECKPOINT_SECONDS ?? "60", 10);
 const uploadSeconds = Number.parseInt(process.env.BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS ?? "900", 10);
 const shouldUpload = process.env.GITHUB_ACTIONS === "true";
+if (shouldUpload && !process.env.GH_TOKEN) {
+  throw new Error("GH_TOKEN is required to upload encrypted browser profile checkpoints");
+}
 const releaseTag = "browser-worker-state";
 let releaseReady = false;
 let lastUploadedAt = 0;
@@ -80,8 +83,16 @@ async function uploadEncryptedAsset(filePath, prefix, suffix) {
   const assetName = `${prefix}-${Date.now()}${suffix}`;
   const assetPath = path.join(artifactDir, assetName);
   await copyFile(filePath, assetPath);
-  await run("gh", ["release", "upload", releaseTag, assetPath]);
-  await pruneReleaseAssets(prefix);
+  try {
+    await run("gh", ["release", "upload", releaseTag, assetPath]);
+  } finally {
+    await rm(assetPath, { force: true });
+  }
+  try {
+    await pruneReleaseAssets(prefix);
+  } catch (error) {
+    console.warn("Could not prune older encrypted profile assets:", error instanceof Error ? error.message : String(error));
+  }
   return assetName;
 }
 
