@@ -242,8 +242,14 @@ jobs:
           fi
 
           if [ "$restored" != "true" ]; then
-            echo "::error::No valid final profile or periodic checkpoint was found. Refusing to start a blank profile."
-            exit 1
+            if ! gh release view browser-worker-state >/dev/null 2>&1; then
+              echo "::warning::No saved browser profile exists yet; starting a fresh profile."
+              mkdir -p "$BROWSER_WORKER_PROFILE_DIR"
+              restored=true
+            else
+              echo "::error::A recovery store exists but no valid profile could be restored; refusing to start blank."
+              exit 1
+            fi
           fi
 
       - name: Remove legacy unencrypted profile artifacts
