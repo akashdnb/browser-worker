@@ -78,7 +78,6 @@ await publishCheckpoint();
 timer = setInterval(() => {
   if (!stopping) void publishCheckpoint();
 }, checkpointSeconds * 1000);
-timer.unref?.();
 
 async function shutdown() {
   if (stopping) return;
