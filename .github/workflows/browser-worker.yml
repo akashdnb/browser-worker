@@ -96,6 +96,7 @@ jobs:
 
           restore_archive() {
             local archive="$1"
+            if [ ! -s "$archive" ] && [ -s "${archive}.enc" ]; then archive="${archive}.enc"; fi
             local decrypted=""
             local extracted="$GITHUB_WORKSPACE/browser-worker-state/profile-restore"
             if [[ "$archive" == *.enc ]]; then
