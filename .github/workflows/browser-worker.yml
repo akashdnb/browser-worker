@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     concurrency:
-      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v2
+      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v3
       cancel-in-progress: false
     outputs:
       should_start: ${{ steps.check.outputs.should_start }}
