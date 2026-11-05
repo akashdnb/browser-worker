@@ -86,13 +86,21 @@ while true; do
   node src/chrome-tab-guard.mjs &
   tab_guard_pid=$!
 
+  run_started_at="$(date +%s)"
   node --import ./src/vm-heartbeat-hook.mjs src/vm.js
   exit_code=$?
+  run_duration=$(( $(date +%s) - run_started_at ))
 
   stop_helper "$watchdog_pid"
   stop_helper "$tab_guard_pid"
   cleanup_display
-  consecutive_failures=$((consecutive_failures + 1))
+  if [ "$run_duration" -ge 300 ]; then
+    echo "Interactive VM ran for ${run_duration}s; resetting restart backoff and failure count"
+    consecutive_failures=0
+    backoff=2
+  else
+    consecutive_failures=$((consecutive_failures + 1))
+  fi
 
   if [ "${exit_code}" -eq 0 ]; then
     echo "Interactive VM relay exited normally; restarting in ${backoff}s"

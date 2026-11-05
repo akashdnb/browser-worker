@@ -14,6 +14,16 @@ const vncPort = Number.parseInt(process.env.VM_VNC_PORT ?? "5900", 10);
 const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10);
 const chromium = process.env.CHROMIUM_BIN;
 const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
+// Keep Chromium startup, the Playwright client, and the watchdog on one timeout.
+// A restored profile plus extension initialization can legitimately take longer
+// than the old 30-second hard-coded probe.
+const cdpStartupTimeoutMs = Number.parseInt(
+  process.env.VM_CHROMIUM_STARTUP_TIMEOUT_MS ?? process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT ?? "120000",
+  10,
+);
+if (!Number.isFinite(cdpStartupTimeoutMs) || cdpStartupTimeoutMs < 30_000 || cdpStartupTimeoutMs > 300_000) {
+  throw new Error("VM_CHROMIUM_STARTUP_TIMEOUT_MS must be between 30000 and 300000");
+}
 
 if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
 if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
@@ -72,11 +82,16 @@ async function waitForPort(host, port, timeoutMs = 20_000) {
   throw new Error(`Timed out waiting for ${host}:${port}`);
 }
 
-async function probeCdp(timeoutMs = 60_000) {
+async function probeCdp(timeoutMs = cdpStartupTimeoutMs, browserProcess = null) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "no response";
   const endpoint = `http://127.0.0.1:${cdpPort}`;
   while (Date.now() < deadline) {
+    if (browserProcess && (browserProcess.exitCode !== null || browserProcess.signalCode !== null)) {
+      lastError = `Chromium process exited before CDP became ready (code=${browserProcess.exitCode}, signal=${browserProcess.signalCode})`;
+      console.error(lastError);
+      return false;
+    }
     try {
       const response = await getCdpResponse(endpoint, "/json/version", { timeoutMs: 1500 });
       if (response.statusCode === 200) {
@@ -89,7 +104,7 @@ async function probeCdp(timeoutMs = 60_000) {
     }
     await sleep(500);
   }
-  console.error(`Chromium CDP did not become ready on 127.0.0.1:${cdpPort}: ${lastError}`);
+  console.error(`Chromium CDP did not become ready on 127.0.0.1:${cdpPort} after ${timeoutMs}ms: ${lastError}`);
   return false;
 }
 
@@ -185,7 +200,7 @@ async function startDesktop() {
   await waitForDisplaySocket();
   start(["openbox"], env, { critical: true });
 
-  start([
+  const chromiumProcess = start([
     chromium,
     "--no-sandbox",
     "--disable-dev-shm-usage",
@@ -203,7 +218,7 @@ async function startDesktop() {
 
   // Start VNC only after the display and browser are confirmed. A transient
   // x11vnc startup failure must not kill Chromium while CDP is booting.
-  if (!(await probeCdp(30_000))) {
+  if (!(await probeCdp(cdpStartupTimeoutMs, chromiumProcess))) {
     await killStaleChromium();
     throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
   }
