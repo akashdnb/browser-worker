@@ -16,6 +16,7 @@ async function makeProfile(root) {
   await writeFile(path.join(profile, "Default", "Sessions", "Tabs_1"), "open tabs");
   await writeFile(path.join(profile, "Default", "Cache", "disposable"), "cache");
   await writeFile(path.join(profile, "SingletonLock"), "lock");
+  await writeFile(path.join(profile, ".org.chromium.Chromium.Local State.tmp"), "stale atomic write");
   return profile;
 }
 
