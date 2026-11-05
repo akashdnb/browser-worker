@@ -7,6 +7,7 @@ test("VM relay only reports connected after gateway authentication", async () =>
   const openHandler = source.slice(source.indexOf('websocket.on("open"'), source.indexOf('websocket.on("message"'));
 
   assert.match(openHandler, /type: "vm\.hello"/);
+  assert.match(openHandler, /worker_id: workerId/);
   assert.match(openHandler, /Timed out waiting for vm\.auth\.ok/);
   assert.doesNotMatch(openHandler, /connected = true/);
   assert.match(source, /message\.type === "vm\.auth\.ok"[\s\S]*?connected = true/);
