@@ -101,7 +101,7 @@ jobs:
   browser:
     needs: guard
     if: needs.guard.outputs.should_start == 'true'
-    runs-on: ${{ inputs.size == 'large' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.size == 'large' && vars.VM_LARGE_RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 350
     name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
     concurrency:
@@ -191,6 +191,10 @@ jobs:
         env:
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
           WORKER_SIZE: ${{ inputs.size || 'standard' }}
+          LARGE_RUNNER_LABEL: ${{ vars.VM_LARGE_RUNNER_LABEL }}
+          LARGE_RUNNER_CPU: ${{ vars.VM_LARGE_RUNNER_CPU }}
+          LARGE_RUNNER_MEMORY_MB: ${{ vars.VM_LARGE_RUNNER_MEMORY_MB }}
+          LARGE_RUNNER_DISK_GB: ${{ vars.VM_LARGE_RUNNER_DISK_GB }}
         run: |
           node --input-type=module <<'NODE'
           const fs = await import('node:fs/promises');
@@ -200,15 +204,25 @@ jobs:
           const disk = Number(spec.resources?.disk_gb ?? 10);
           const gpu = spec.resources?.gpu;
           const size = process.env.WORKER_SIZE;
-          const profiles = {
-            standard: {cpu: 2, memory_mb: 8192, disk_gb: 14},
-            large: {cpu: 8, memory_mb: 32768, disk_gb: 32},
+          const standard = {cpu: 2, memory_mb: 8192, disk_gb: 14};
+          const large = {
+            cpu: Number(process.env.LARGE_RUNNER_CPU),
+            memory_mb: Number(process.env.LARGE_RUNNER_MEMORY_MB),
+            disk_gb: Number(process.env.LARGE_RUNNER_DISK_GB),
           };
-          const profile = profiles[size];
-          if (!profile) throw new Error("Unsupported GitHub runner size");
-          if (gpu) throw new Error("GPU is not available in configured GitHub-hosted runner profiles");
+          if (gpu) throw new Error("GPU is not available on the configured GitHub Actions runner profiles");
+          let profile = standard;
+          if (size === "large") {
+            if (!process.env.LARGE_RUNNER_LABEL || !Number.isFinite(large.cpu) ||
+                !Number.isFinite(large.memory_mb) || !Number.isFinite(large.disk_gb)) {
+              throw new Error("Configure VM_LARGE_RUNNER_LABEL, VM_LARGE_RUNNER_CPU, VM_LARGE_RUNNER_MEMORY_MB and VM_LARGE_RUNNER_DISK_GB as browser-worker repository variables before requesting a large VM");
+            }
+            profile = large;
+          } else if (size !== "standard") {
+            throw new Error("Unsupported GitHub runner size");
+          }
           if (cpu > profile.cpu || memory > profile.memory_mb || disk > profile.disk_gb) {
-            throw new Error(`Requested resources exceed ${size} runner: ${JSON.stringify(profile)}`);
+            throw new Error(`Requested resources (${cpu} CPU, ${memory} MB, ${disk} GB) exceed the ${size} GitHub runner profile: ${JSON.stringify(profile)}`);
           }
           NODE
 
