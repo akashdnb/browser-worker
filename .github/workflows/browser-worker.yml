@@ -634,6 +634,7 @@ jobs:
           fi
 
       - name: Prepare encrypted VM browser profile artifact
+        id: vm_profile
         if: ${{ always() && inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' && env.VM_LIFECYCLE_MODE == 'persistent' && env.VM_BROWSER_PERSISTENT_PROFILE == 'true' }}
         env:
           PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
@@ -643,6 +644,7 @@ jobs:
           set -euo pipefail
           if [ ! -s "$PROFILE_DIR/Local State" ] || [ ! -s "$PROFILE_DIR/Default/Preferences" ]; then
             echo "::warning::No complete Chromium profile is available to checkpoint."
+            echo "has_profile=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           test -n "$PROFILE_KEY" || { echo "::error::Browser profile encryption key is unavailable"; exit 1; }
@@ -671,9 +673,10 @@ jobs:
           NODE
           rm -f "$PROFILE_OUTPUT_DIR/profile.tar.gz"
           rm -rf "$stage"
+          echo "has_profile=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload encrypted VM browser profile artifact
-        if: ${{ always() && inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' && env.VM_LIFECYCLE_MODE == 'persistent' && env.VM_BROWSER_PERSISTENT_PROFILE == 'true' && hashFiles(format('{0}/browser-worker-profile.tar.gz.enc', runner.temp + '/vm-profile-artifact')) != '' }}
+        if: ${{ always() && steps.vm_profile.outputs.has_profile == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: vm-profile-${{ inputs.vm_id }}
