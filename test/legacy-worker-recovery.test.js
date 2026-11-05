@@ -23,3 +23,10 @@ test("stale queued legacy runs are cancelled so they cannot block recovery", asy
   assert.match(workflow, /Cancelling stale queued legacy Browser Worker run/);
   assert.match(workflow, /age_seconds.*-gt 600/);
 });
+
+test("legacy guard identifies fleet runs from run names without per-run API calls", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  assert.match(workflow, /\[\.databaseId,\.createdAt,\.name\]/);
+  assert.match(workflow, /"VM "\*\) continue/);
+  assert.doesNotMatch(workflow, /gh run view "\$candidate"/);
+});
