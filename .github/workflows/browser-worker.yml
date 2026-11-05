@@ -137,7 +137,18 @@ jobs:
           worker_mode="$(jq -er .worker_mode <<< "$response")"
           browser_url="$(jq -er .browser_worker_ws_url <<< "$response")"
           vm_url="$(jq -er .vm_worker_ws_url <<< "$response")"
+          lifecycle_mode="$(jq -r '.lifecycle.mode // "on_demand"' <<< "$vm_spec")"
+          profile_persistent="$(jq -r '.browser.persistent_profile // true' <<< "$vm_spec")"
+          profile_key="$(jq -r '.browser_profile_encryption_key // empty' <<< "$response")"
+          if [ "$worker_mode" = "browser" ] && [ "$lifecycle_mode" = "persistent" ] && [ "$profile_persistent" = "true" ] && [ -z "$profile_key" ]; then
+            echo "::error::Persistent browser VMs require VM_BROWSER_PROFILE_ENCRYPTION_KEY on the Utils service."
+            exit 1
+          fi
           echo "::add-mask::$worker_token"
+          if [ -n "$profile_key" ]; then
+            echo "::add-mask::$profile_key"
+            echo "BROWSER_WORKER_PROFILE_ENCRYPTION_KEY=$profile_key" >> "$GITHUB_ENV"
+          fi
           printf '%s' "$vm_spec" > "$RUNNER_TEMP/vm-spec.json"
           {
             echo "VM_ID=$VM_ID"
@@ -494,7 +505,7 @@ jobs:
             exit 0
           fi
           if [ -z "$BROWSER_WORKER_PROFILE_ENCRYPTION_KEY" ]; then
-            echo "::error::Set BROWSER_WORKER_PROFILE_ENCRYPTION_KEY in browser-worker repository secrets to persist per-VM browser profiles."
+            echo "::error::VM_BROWSER_PROFILE_ENCRYPTION_KEY must be configured on the Utils Render service."
             exit 1
           fi
           if gh release view "$PROFILE_RELEASE" >/dev/null 2>&1; then
