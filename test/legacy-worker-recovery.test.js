@@ -38,12 +38,15 @@ test("each recovery run can replace a stuck prior guard", async () => {
   assert.match(workflow, /cancel-in-progress: false/);
 });
 
-test("push handoff replaces the legacy worker through its concurrency group", async () => {
+test("push handoff can replace an orphaned legacy run without waiting on its concurrency lock", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   assert.match(workflow, /Push handoff uses the legacy browser job concurrency group/);
   assert.match(workflow, /should_start=true/);
-  assert.match(workflow, /cancel-in-progress:.*github\.event_name == 'push'/);
+  assert.match(workflow, /format\('utils-vm-legacy-browser-session-\{0\}', github\.run_id\)/);
+  assert.match(workflow, /cancel-in-progress: \$\{\{ inputs\.vm_id != '' \}\}/);
+  assert.match(workflow, /gh run cancel "\$run_id"/);
   assert.match(workflow, /timeout-minutes: 2/);
+  assert.ok(workflow.indexOf("Stop older worker runs after a push deployment") < workflow.indexOf("Set up Node.js"));
 });
 
 test("legacy guard uses the GitHub REST run title and path fields", async () => {
