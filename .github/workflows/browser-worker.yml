@@ -160,12 +160,10 @@ jobs:
         env:
           VM_ID: ${{ inputs.vm_id }}
           BOOTSTRAP_URL: https://utils-l1pw.onrender.com/vm-fleet/bootstrap
-          REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-          REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$REQUEST_URL" && test -n "$REQUEST_TOKEN"
-          oidc="$(curl -fsS -H "Authorization: bearer $REQUEST_TOKEN" "${REQUEST_URL}&audience=utils-vm-bootstrap" | jq -er .value)"
+          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
+          oidc="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=utils-vm-bootstrap" | jq -er .value)"
           response="$(curl -fsS -X POST "$BOOTSTRAP_URL" -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" --data "$(jq -nc --arg vm_id "$VM_ID" '{vm_id:$vm_id}')")"
           worker_token="$(jq -er .worker_token <<< "$response")"
           vm_spec="$(jq -ec .spec <<< "$response")"
