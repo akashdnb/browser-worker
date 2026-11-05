@@ -1,4 +1,5 @@
 name: Browser Worker Secondary
+run-name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
 
 on:
   workflow_dispatch:
@@ -116,7 +117,7 @@ jobs:
     name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
     concurrency:
       group: utils-vm-${{ inputs.vm_id || 'legacy-browser-session' }}
-      cancel-in-progress: false
+      cancel-in-progress: ${{ inputs.vm_id != '' }}
     steps:
       - name: Checkout worker configuration
         uses: actions/checkout@v4
