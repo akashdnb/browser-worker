@@ -53,6 +53,7 @@ permissions:
 jobs:
   guard:
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     concurrency:
       group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v2
       cancel-in-progress: false
@@ -105,7 +106,7 @@ jobs:
               while IFS= read -r stale_run_id; do
                 [ -n "$stale_run_id" ] || continue
                 echo "::notice::Cancelling legacy Browser Worker run $stale_run_id before push handoff."
-                gh run cancel "$stale_run_id" --repo "$REPO" || true
+                gh api --method POST "repos/$REPO/actions/runs/$stale_run_id/cancel" >/dev/null 2>&1 || true
               done < <(legacy_run_ids "$state")
             done
             for attempt in $(seq 1 60); do
