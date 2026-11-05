@@ -115,6 +115,31 @@ jobs:
       group: utils-vm-${{ inputs.vm_id || 'legacy-browser-session' }}
       cancel-in-progress: false
     steps:
+      - name: Validate requested VM resources
+        if: ${{ inputs.vm_id }}
+        env:
+          VM_SPEC: ${{ inputs.vm_spec }}
+          WORKER_SIZE: ${{ inputs.size || 'standard' }}
+        run: |
+          node --input-type=module <<'NODE'
+          const spec = JSON.parse(process.env.VM_SPEC);
+          const cpu = Number(spec.resources?.cpu ?? 2);
+          const memory = Number(spec.resources?.memory_mb ?? 4096);
+          const disk = Number(spec.resources?.disk_gb ?? 30);
+          const gpu = spec.resources?.gpu;
+          const size = process.env.WORKER_SIZE;
+          const profiles = {
+            standard: {cpu: 2, memory_mb: 8192, disk_gb: 14},
+            large: {cpu: 8, memory_mb: 32768, disk_gb: 32},
+          };
+          const profile = profiles[size];
+          if (!profile) throw new Error("Unsupported GitHub runner size");
+          if (gpu) throw new Error("GPU is not available in the configured GitHub-hosted runner profiles");
+          if (cpu > profile.cpu || memory > profile.memory_mb || disk > profile.disk_gb) {
+            throw new Error(`Requested resources exceed ${size} GitHub runner: ${JSON.stringify(profile)}`);
+          }
+          NODE
+
       - name: Checkout worker configuration
         uses: actions/checkout@v4
 
