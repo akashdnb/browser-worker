@@ -295,7 +295,7 @@ jobs:
 
       - name: Run browser worker and interactive desktop
         env:
-          UTILS_BROWSER_WORKER_URL: https://utils-l1pw.onrender.com/browser-worker
+          UTILS_BROWSER_WORKER_URL: https://utils-zkiy.onrender.com/browser-worker
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
