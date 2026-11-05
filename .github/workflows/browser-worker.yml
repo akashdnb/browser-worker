@@ -287,7 +287,7 @@ jobs:
 
       - name: Run browser worker and interactive desktop
         env:
-          UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
+          UTILS_BROWSER_WORKER_URL: https://utils-l1pw.onrender.com/browser-worker
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
@@ -311,6 +311,7 @@ jobs:
           test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
           test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
           test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
+          echo "Connecting interactive VM to ${UTILS_BROWSER_WORKER_URL%/browser-worker}"
 
           bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
           vm_pid=$!
