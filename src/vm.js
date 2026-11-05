@@ -14,6 +14,8 @@ const vncPort = Number.parseInt(process.env.VM_VNC_PORT ?? "5900", 10);
 const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10);
 const chromium = process.env.CHROMIUM_BIN;
 const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
+const workerMode = process.env.WORKER_MODE ?? "browser";
+const workerSocketPath = workerMode === "compute" ? "/vm-fleet-worker" : "/vm-worker";
 // Keep Chromium startup, the Playwright client, and the watchdog on one timeout.
 // A restored profile plus extension initialization can legitimately take longer
 // than the old 30-second hard-coded probe.
@@ -26,7 +28,7 @@ if (!Number.isFinite(cdpStartupTimeoutMs) || cdpStartupTimeoutMs < 30_000 || cdp
 }
 
 if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
-if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
+if (workerMode === "browser" && !chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
 
 const processes = [];
 const vncSockets = new Map();
@@ -188,6 +190,7 @@ async function killStaleChromium() {
 }
 
 async function startDesktop() {
+  if (workerMode === "compute") return;
   const env = { ...process.env, DISPLAY: display };
 
   // vm-supervisor may have terminated the wrapper process while its real
@@ -308,10 +311,11 @@ async function handleCommand(payload) {
       userDataDir,
       cdpPort,
       cwd: process.cwd(),
-      capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
+      capabilities: workerMode === "compute" ? ["terminal", "files", "processes", "packages"] : ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
     };
   }
   if (action === "restore_browser") {
+    if (workerMode === "compute") throw new Error("Browser is disabled for this compute-only VM");
     return await runCommand("windows=$(xdotool search --class chromium 2>/dev/null || true); test -n \"$windows\" || { echo 'Chromium window not found' >&2; exit 1; }; for window in $windows; do xdotool windowmap $window 2>/dev/null || true; xdotool windowactivate --sync $window 2>/dev/null || true; xdotool windowraise $window 2>/dev/null || true; xdotool windowsize $window 1440 900 2>/dev/null || true; done", 10);
   }
   if (action === "exec") {
@@ -376,6 +380,7 @@ async function handleCommand(payload) {
     }
   }
   if (action === "screenshot") {
+    if (workerMode === "compute") throw new Error("Desktop is disabled for this compute-only VM");
     const path = "/tmp/interactive-vm-screen.png";
     const result = await runCommand(`scrot -o ${shellQuote(path)}`, 15);
     if (!result.ok) return result;
@@ -391,6 +396,7 @@ async function handleCommand(payload) {
     throw new Error("manager must be apt or npm");
   }
   if (action === "open_url") {
+    if (workerMode === "compute") throw new Error("Browser is disabled for this compute-only VM");
     const url = payload?.url;
     if (typeof url !== "string" || !/^https?:\/\//.test(url)) throw new Error("Only HTTP(S) URLs are allowed");
     start([chromium, "--new-tab", url], { ...process.env, DISPLAY: display });
@@ -450,7 +456,7 @@ async function connectRelay(uri) {
         type: "vm.hello",
         token,
         workerId,
-        capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
+        capabilities: workerMode === "compute" ? ["terminal", "files", "processes", "packages"] : ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
       }));
       // A successful TCP/WebSocket upgrade is not proof that the gateway
       // accepted this worker. Wait for the explicit auth acknowledgement
@@ -539,10 +545,12 @@ async function connectRelay(uri) {
 }
 
 async function main() {
-  await startDesktop();
-  await waitForPort("127.0.0.1", vncPort);
+  if (workerMode === "browser") {
+    await startDesktop();
+    await waitForPort("127.0.0.1", vncPort);
+  }
 
-  const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
+  const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}${workerSocketPath}`;
   let backoffMs = 2_000;
 
   while (!stopping) {
