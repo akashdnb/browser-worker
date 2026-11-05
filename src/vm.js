@@ -260,7 +260,7 @@ async function startDesktop() {
 }
 function clampTimeoutSeconds(value) {
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.min(300, Math.max(1, parsed)) : 60;
+  return Number.isFinite(parsed) ? Math.min(86_400, Math.max(1, parsed)) : 60;
 }
 
 function shellQuote(value) {
@@ -463,6 +463,7 @@ async function connectRelay(uri) {
         type: "vm.hello",
         token,
         workerId,
+        vm_id: workerId,
         capabilities: workerMode === "compute" ? ["terminal", "files", "processes", "packages"] : ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
       }));
       // A successful TCP/WebSocket upgrade is not proof that the gateway
@@ -535,7 +536,7 @@ async function connectRelay(uri) {
             websocket.send(JSON.stringify({
               type: "vm.task.result",
               request_id: message.request_id,
-              result: { returncode: result.returncode ?? (result.ok ? 0 : 1), stdout: result.stdout ?? "", stderr: result.stderr ?? result.error ?? "" },
+              result: { returncode: result.returncode ?? (result.ok ? 0 : 1), stdout: result.stdout ?? result.output ?? "", stderr: result.stderr ?? result.error ?? "" },
             }));
           }
         } catch (error) {
