@@ -11,14 +11,6 @@ on:
         description: "Stable Utils VM instance ID; leave blank for the legacy shared browser worker"
         required: false
         type: string
-      vm_spec:
-        description: "JSON VM spec supplied by Utils"
-        required: false
-        type: string
-      worker_token:
-        description: "Per-instance Utils worker credential"
-        required: false
-        type: string
       worker_mode:
         description: "compute or browser"
         required: false
@@ -46,6 +38,7 @@ concurrency:
 permissions:
   contents: write
   actions: write
+  id-token: write
 
 jobs:
   guard:
@@ -118,11 +111,12 @@ jobs:
       - name: Validate requested VM resources
         if: ${{ inputs.vm_id }}
         env:
-          VM_SPEC: ${{ inputs.vm_spec }}
+          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
           WORKER_SIZE: ${{ inputs.size || 'standard' }}
         run: |
           node --input-type=module <<'NODE'
-          const spec = JSON.parse(process.env.VM_SPEC);
+          const fs = await import('node:fs/promises');
+          const spec = JSON.parse(await fs.readFile(process.env.VM_SPEC_PATH, 'utf8'));
           const cpu = Number(spec.resources?.cpu ?? 2);
           const memory = Number(spec.resources?.memory_mb ?? 4096);
           const disk = Number(spec.resources?.disk_gb ?? 30);
@@ -146,7 +140,13 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ inputs.vm_id && fromJSON(inputs.vm_spec || '{}').runtime.node || '22' }}
+          node-version: ${{ steps.bootstrap.outputs.node_version || '22' }}
+
+      - name: Set up Python
+        if: ${{ inputs.vm_id }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.bootstrap.outputs.python_version || '3.12' }}
 
       - name: Set up interactive desktop dependencies
         if: ${{ inputs.worker_mode != 'compute' }}
@@ -154,30 +154,81 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y xvfb x11vnc openbox xdotool
 
-      - name: Prepare VM identity and worker environment
+      - name: Prepare VM identity and OIDC bootstrap
+        id: bootstrap
+        if: ${{ inputs.vm_id }}
         env:
-          VM_ID: ${{ inputs.vm_id || '' }}
-          VM_SPEC: ${{ inputs.vm_spec || '' }}
-          VM_WORKER_TOKEN: ${{ inputs.worker_token || '' }}
-          WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
-          WORKER_SIZE: ${{ inputs.size || 'standard' }}
+          VM_ID: ${{ inputs.vm_id }}
+          BOOTSTRAP_URL: https://utils-l1pw.onrender.com/vm-fleet/bootstrap
+          REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$REQUEST_URL" && test -n "$REQUEST_TOKEN"
+          oidc="$(curl -fsS -H "Authorization: bearer $REQUEST_TOKEN" "${REQUEST_URL}&audience=utils-vm-bootstrap" | jq -er .value)"
+          response="$(curl -fsS -X POST "$BOOTSTRAP_URL" -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" --data "$(jq -nc --arg vm_id "$VM_ID" '{vm_id:$vm_id}')")"
+          worker_token="$(jq -er .worker_token <<< "$response")"
+          vm_spec="$(jq -ec .spec <<< "$response")"
+          worker_mode="$(jq -er .worker_mode <<< "$response")"
+          browser_url="$(jq -er .browser_worker_ws_url <<< "$response")"
+          vm_url="$(jq -er .vm_worker_ws_url <<< "$response")"
+          echo "::add-mask::$worker_token"
+          printf '%s' "$vm_spec" > "$RUNNER_TEMP/vm-spec.json"
+          {
+            echo "VM_ID=$VM_ID"
+            echo "VM_SPEC_PATH=$RUNNER_TEMP/vm-spec.json"
+            echo "VM_WORKER_TOKEN=$worker_token"
+            echo "UTILS_BROWSER_WORKER_TOKEN=$worker_token"
+            echo "UTILS_BROWSER_WORKER_URL=$browser_url"
+            echo "UTILS_VM_FLEET_URL=$vm_url"
+            echo "WORKER_MODE=$worker_mode"
+            echo "BROWSER_WORKER_PROFILE_DIR=$RUNNER_TEMP/vm-profile-$VM_ID"
+            echo "PLAYWRIGHT_MCP_USER_DATA_DIR=$RUNNER_TEMP/vm-profile-$VM_ID"
+            echo "BROWSER_WORKER_CHECKPOINT_DIR=$RUNNER_TEMP/vm-checkpoint-$VM_ID"
+            echo "BROWSER_WORKER_STATE_FILE=$RUNNER_TEMP/vm-checkpoint-$VM_ID/storage-state.json"
+            echo "BROWSER_WORKER_STATE_RELEASE_TAG=vm-profile-$VM_ID"
+            echo "VM_LIFECYCLE_MODE=$(jq -r '.lifecycle.mode // "on_demand"' <<< "$vm_spec")"
+            echo "VM_MAX_LIFETIME_MINUTES=$(jq -r '.lifecycle.max_lifetime_minutes // 350' <<< "$vm_spec")"
+            echo "VM_PYTHON_VERSION=$(jq -r '.runtime.python // "3.12"' <<< "$vm_spec")"
+            echo "VM_NODE_VERSION=$(jq -r '.runtime.node // "22"' <<< "$vm_spec")"
+          } >> "$GITHUB_ENV"
+          {
+            echo "python_version=$(jq -r '.runtime.python // "3.12"' <<< "$vm_spec")"
+            echo "node_version=$(jq -r '.runtime.node // "22"' <<< "$vm_spec")"
+            echo "worker_mode=$worker_mode"
+          } >> "$GITHUB_OUTPUT"
+          # VM startup environment is masked before being exposed to subsequent steps.
+          while IFS= read -r entry; do
+            key="$(jq -r .key <<< "$entry")"
+            value="$(jq -r .value <<< "$entry")"
+            echo "::add-mask::$value"
+            delimiter="VM_ENV_$(openssl rand -hex 12)"
+            {
+              printf '%s<<%s\n' "$key" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_ENV"
+          done < <(jq -c '.startup.environment // {} | to_entries[]' <<< "$vm_spec")
+          # Run the user-supplied setup scripts on this isolated runner.
+          while IFS= read -r script; do
+            bash -euo pipefail -c "$script"
+          done < <(jq -r '.startup.setup_scripts[]? // empty' <<< "$vm_spec")
+          # Secret references are resolved by a dedicated secret bridge, not by workflow inputs.
+          if [ "$(jq '(.startup.secret_refs // {}) | length' <<< "$vm_spec")" -gt 0 ]; then
+            echo "::warning::VM has secret_refs; values are not injected until a supported secret resolver is configured."
+          fi
+
+      - name: Configure legacy worker environment
+        if: ${{ !inputs.vm_id }}
+        env:
           DEFAULT_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
         run: |
-          if [ -n "$VM_ID" ]; then
-            test -n "$VM_SPEC" || { echo "::error::vm_spec is required for a fleet VM"; exit 1; }
-            test -n "$VM_WORKER_TOKEN" || { echo "::error::worker_token is required for a fleet VM"; exit 1; }
-            echo "$VM_SPEC" > "$RUNNER_TEMP/vm-spec.json"
-            echo "VM_ID=$VM_ID" >> "$GITHUB_ENV"
-            echo "VM_SPEC_PATH=$RUNNER_TEMP/vm-spec.json" >> "$GITHUB_ENV"
-            echo "VM_WORKER_TOKEN=$VM_WORKER_TOKEN" >> "$GITHUB_ENV"
-            echo "WORKER_MODE=$WORKER_MODE" >> "$GITHUB_ENV"
-            echo "BROWSER_WORKER_PROFILE_DIR=$RUNNER_TEMP/vm-profile-$VM_ID" >> "$GITHUB_ENV"
-          else
-            echo "WORKER_MODE=browser" >> "$GITHUB_ENV"
-          fi
-          if [ -z "$VM_ID" ] && [ "$WORKER_MODE" = "browser" ]; then
-            test -n "$DEFAULT_WORKER_TOKEN" || { echo "::error::Legacy browser worker token is missing"; exit 1; }
-          fi
+          test -n "$DEFAULT_WORKER_TOKEN" || { echo "::error::Legacy browser worker token is missing"; exit 1; }
+          {
+            echo "WORKER_MODE=browser"
+            echo "UTILS_BROWSER_WORKER_TOKEN=$DEFAULT_WORKER_TOKEN"
+            echo "UTILS_BROWSER_WORKER_URL=https://utils-l1pw.onrender.com/browser-worker"
+          } >> "$GITHUB_ENV"
 
       - name: Restore previous browser profile
         if: ${{ inputs.worker_mode != 'compute' && !inputs.vm_id }}
@@ -361,11 +412,12 @@ jobs:
 
       - name: Install requested runtimes and packages
         env:
-          VM_SPEC: ${{ inputs.vm_spec || '{}' }}
-          WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
+          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
+          WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y jq curl ca-certificates
+          VM_SPEC="$(cat "$VM_SPEC_PATH" 2>/dev/null || echo '{}')"
           if [ -n "$(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]? // empty')" ]; then
             mapfile -t apt_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]?')
             sudo apt-get install -y -- ${apt_packages[@]}
@@ -415,26 +467,19 @@ jobs:
           VM_ID: ${{ inputs.vm_id || '' }}
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
           WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
-          BROWSER_WORKER_PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id || github.run_id }}
-          VM_CPU_REQUESTED: ${{ fromJSON(inputs.vm_spec || '{}').resources.cpu || '2' }}
-          VM_MEMORY_REQUESTED_MB: ${{ fromJSON(inputs.vm_spec || '{}').resources.memory_mb || '4096' }}
-          VM_DISK_REQUESTED_GB: ${{ fromJSON(inputs.vm_spec || '{}').resources.disk_gb || '30' }}
           WORKER_SIZE: ${{ inputs.size || 'standard' }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
-          BROWSER_WORKER_STATE_FILE: ${{ runner.temp }}/vm-checkpoint-${{ inputs.vm_id || github.run_id }}/storage-state.json
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
-          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id || github.run_id }}
-          BROWSER_WORKER_CHECKPOINT_DIR: ${{ runner.temp }}/vm-checkpoint-${{ inputs.vm_id || github.run_id }}
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
           WORKER_MAX_SECONDS: "19800"
           WORKER_RENEWAL_LEAD_SECONDS: "900"
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
-          VM_WORKER_ID: github-${{ github.run_id }}
           VM_CHROMIUM_DEBUG_PORT: "9222"
           DISPLAY: ":99"
         run: |
@@ -473,10 +518,14 @@ jobs:
           else
             echo "Worker running in compute-only mode: no browser packages or desktop are started."
           fi
-          node src/worker.js
+          if [ "$WORKER_MODE" = "browser" ]; then
+            node src/worker.js
+          else
+            node src/vm.js
+          fi
 
       - name: Prepare and encrypt browser profile artifacts
-        if: ${{ always() && inputs.worker_mode != 'compute' && !inputs.vm_id }}
+        if: ${{ always() && steps.bootstrap.outputs.worker_mode == 'browser' && !inputs.vm_id }}
         env:
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
