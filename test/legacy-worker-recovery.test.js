@@ -15,7 +15,7 @@ test("legacy recovery guard skips cleanly when a worker is already active", asyn
 
 test("fleet VM guards do not serialize behind the legacy worker guard", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /group: browser-worker-guard-\$\{\{ github\.ref \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy' \}\}/);
+  assert.match(workflow, /group: browser-worker-guard-\$\{\{ github\.ref \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy' \}\}-v2/);
 });
 
 test("stale queued legacy runs do not block recovery", async () => {
@@ -30,4 +30,10 @@ test("legacy guard identifies fleet runs from run names without per-run API call
   assert.match(workflow, /\[\.databaseId,\.createdAt,\.name\]/);
   assert.match(workflow, /"VM "\*\) continue/);
   assert.doesNotMatch(workflow, /gh run view "\$candidate"/);
+});
+
+test("each recovery run can replace a stuck prior guard", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  assert.match(workflow, /group: \$\{\{ github\.workflow \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy-browser-session' \}\}-\$\{\{ github\.run_id \}\}/);
+  assert.match(workflow, /cancel-in-progress: false/);
 });
