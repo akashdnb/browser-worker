@@ -463,6 +463,7 @@ async function connectRelay(uri) {
         type: "vm.hello",
         token,
         workerId,
+        worker_id: workerId,
         vm_id: workerId,
         capabilities: workerMode === "compute" ? ["terminal", "files", "processes", "packages"] : ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
       }));
