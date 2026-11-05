@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const LOCK_NAMES = ["SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"];
@@ -67,6 +67,10 @@ export async function createProfileCheckpoint({
   try {
     await run("cp", ["-a", source, stagedProfile]);
     for (const name of LOCK_NAMES) {
+      await rm(resolve(stagedProfile, name), { force: true, recursive: true });
+    }
+    const stagedEntries = await readdir(stagedProfile);
+    for (const name of stagedEntries.filter((entry) => entry.startsWith(".org.chromium."))) {
       await rm(resolve(stagedProfile, name), { force: true, recursive: true });
     }
     for (const name of DISPOSABLE_PATHS) {
