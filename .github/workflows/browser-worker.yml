@@ -1,4 +1,4 @@
-name: Browser Worker Primary
+name: Browser Worker Secondary
 
 on:
   workflow_dispatch:
