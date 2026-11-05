@@ -102,58 +102,14 @@ jobs:
     needs: guard
     if: needs.guard.outputs.should_start == 'true'
     runs-on: ${{ inputs.size == 'large' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
-    timeout-minutes: ${{ inputs.vm_id && fromJSON(inputs.vm_spec || '{}').lifecycle.max_lifetime_minutes && fromJSON(inputs.vm_spec || '{}').lifecycle.max_lifetime_minutes < 350 ? fromJSON(inputs.vm_spec || '{}').lifecycle.max_lifetime_minutes : 350 }}
+    timeout-minutes: 350
     name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
     concurrency:
       group: utils-vm-${{ inputs.vm_id || 'legacy-browser-session' }}
       cancel-in-progress: false
     steps:
-      - name: Validate requested VM resources
-        if: ${{ inputs.vm_id }}
-        env:
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          WORKER_SIZE: ${{ inputs.size || 'standard' }}
-        run: |
-          node --input-type=module <<'NODE'
-          const fs = await import('node:fs/promises');
-          const spec = JSON.parse(await fs.readFile(process.env.VM_SPEC_PATH, 'utf8'));
-          const cpu = Number(spec.resources?.cpu ?? 2);
-          const memory = Number(spec.resources?.memory_mb ?? 4096);
-          const disk = Number(spec.resources?.disk_gb ?? 30);
-          const gpu = spec.resources?.gpu;
-          const size = process.env.WORKER_SIZE;
-          const profiles = {
-            standard: {cpu: 2, memory_mb: 8192, disk_gb: 14},
-            large: {cpu: 8, memory_mb: 32768, disk_gb: 32},
-          };
-          const profile = profiles[size];
-          if (!profile) throw new Error("Unsupported GitHub runner size");
-          if (gpu) throw new Error("GPU is not available in the configured GitHub-hosted runner profiles");
-          if (cpu > profile.cpu || memory > profile.memory_mb || disk > profile.disk_gb) {
-            throw new Error(`Requested resources exceed ${size} GitHub runner: ${JSON.stringify(profile)}`);
-          }
-          NODE
-
       - name: Checkout worker configuration
         uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.bootstrap.outputs.node_version || '22' }}
-
-      - name: Set up Python
-        if: ${{ inputs.vm_id }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.bootstrap.outputs.python_version || '3.12' }}
-
-      - name: Set up interactive desktop dependencies
-        if: ${{ inputs.worker_mode != 'compute' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc openbox xdotool
-
       - name: Prepare VM identity and OIDC bootstrap
         id: bootstrap
         if: ${{ inputs.vm_id }}
@@ -215,6 +171,50 @@ jobs:
           if [ "$(jq '(.startup.secret_refs // {}) | length' <<< "$vm_spec")" -gt 0 ]; then
             echo "::warning::VM has secret_refs; values are not injected until a supported secret resolver is configured."
           fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.bootstrap.outputs.node_version || '22' }}
+
+      - name: Set up Python
+        if: ${{ inputs.vm_id }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.bootstrap.outputs.python_version || '3.12' }}
+
+      - name: Validate requested VM resources
+        if: ${{ inputs.vm_id }}
+        env:
+          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
+          WORKER_SIZE: ${{ inputs.size || 'standard' }}
+        run: |
+          node --input-type=module <<'NODE'
+          const fs = await import('node:fs/promises');
+          const spec = JSON.parse(await fs.readFile(process.env.VM_SPEC_PATH, 'utf8'));
+          const cpu = Number(spec.resources?.cpu ?? 2);
+          const memory = Number(spec.resources?.memory_mb ?? 4096);
+          const disk = Number(spec.resources?.disk_gb ?? 30);
+          const gpu = spec.resources?.gpu;
+          const size = process.env.WORKER_SIZE;
+          const profiles = {
+            standard: {cpu: 2, memory_mb: 8192, disk_gb: 14},
+            large: {cpu: 8, memory_mb: 32768, disk_gb: 32},
+          };
+          const profile = profiles[size];
+          if (!profile) throw new Error("Unsupported GitHub runner size");
+          if (gpu) throw new Error("GPU is not available in the configured GitHub-hosted runner profiles");
+          if (cpu > profile.cpu || memory > profile.memory_mb || disk > profile.disk_gb) {
+            throw new Error(`Requested resources exceed ${size} GitHub runner: ${JSON.stringify(profile)}`);
+          }
+          NODE
+
+
+      - name: Set up interactive desktop dependencies
+        if: ${{ inputs.worker_mode != 'compute' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc openbox xdotool
 
       - name: Configure legacy worker environment
         if: ${{ !inputs.vm_id }}
