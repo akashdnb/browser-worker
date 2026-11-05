@@ -34,8 +34,10 @@ on:
   push:
     branches:
       - main
+  # Self-heal the legacy interactive browser if its long-lived Actions run is cancelled.
+  # The guard job is cheap and skips whenever a legacy worker is already active.
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "*/10 * * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.vm_id || 'legacy-browser-session' }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
@@ -107,7 +109,7 @@ jobs:
           active_run_id="$(legacy_run_ids in_progress | head -n 1 || true)"
           queued_run_id="$(legacy_run_ids queued | head -n 1 || true)"
           if [ -n "$active_run_id" ] || [ -n "$queued_run_id" ]; then
-            echo "::error::Refusing to start while another Browser Worker run is active (active=$active_run_id queued=$queued_run_id)."
+            echo "::notice::Legacy Browser Worker is already active or queued (active=$active_run_id queued=$queued_run_id); skipping this recovery check."
             echo "should_start=false" >> "$GITHUB_OUTPUT"
           else
             echo "No other Browser Worker run is active or queued"
