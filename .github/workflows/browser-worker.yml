@@ -447,11 +447,80 @@ jobs:
             bash -euo pipefail -c "$script"
           done < <(jq -c '.startup.setup_scripts[]? // empty' "$VM_SPEC_PATH")
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.bootstrap.outputs.node_version || '22' }}
+
+      - name: Set up Python
+        if: ${{ inputs.vm_id }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.bootstrap.outputs.python_version || '3.12' }}
+
+      - name: Validate requested VM resources
+        if: ${{ inputs.vm_id }}
+        env:
+          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
+          WORKER_SIZE: ${{ inputs.size || 'standard' }}
+        run: |
+          node --input-type=module <<'NODE'
+          const fs = await import('node:fs/promises');
+          const spec = JSON.parse(await fs.readFile(process.env.VM_SPEC_PATH, 'utf8'));
+          const cpu = Number(spec.resources?.cpu ?? 2);
+          const memory = Number(spec.resources?.memory_mb ?? 4096);
+          const disk = Number(spec.resources?.disk_gb ?? 10);
+          const gpu = spec.resources?.gpu;
+          const size = process.env.WORKER_SIZE;
+          const profiles = {
+            standard: {cpu: 2, memory_mb: 8192, disk_gb: 14},
+            large: {cpu: 8, memory_mb: 32768, disk_gb: 32},
+          };
+          const profile = profiles[size];
+          if (!profile) throw new Error("Unsupported GitHub runner size");
+          if (gpu) throw new Error("GPU is not available in configured GitHub-hosted runner profiles");
+          if (cpu > profile.cpu || memory > profile.memory_mb || disk > profile.disk_gb) {
+            throw new Error(`Requested resources exceed ${size} runner: ${JSON.stringify(profile)}`);
+          }
+          NODE
+
+      - name: Install requested runtimes and packages
+        env:
+          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
+          WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq curl ca-certificates
+          VM_SPEC="$(cat "$VM_SPEC_PATH" 2>/dev/null || echo '{}')"
+          mapfile -t apt_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]?')
+          if [ "${#apt_packages[@]}" -gt 0 ]; then sudo apt-get install -y -- "${apt_packages[@]}"; fi
+          mapfile -t pip_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_pip[]?')
+          if [ "${#pip_packages[@]}" -gt 0 ]; then python -m pip install --user --break-system-packages "${pip_packages[@]}"; fi
+          mapfile -t npm_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_npm[]?')
+          if [ "${#npm_packages[@]}" -gt 0 ]; then npm install --global "${npm_packages[@]}"; fi
+          mapfile -t cli_tools < <(echo "$VM_SPEC" | jq -r '.runtime.cli_tools[]?')
+          if [ "${#cli_tools[@]}" -gt 0 ]; then sudo apt-get install -y -- "${cli_tools[@]}"; fi
+          npm install --no-save ws@^8.18.0
+          if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
+
+      - name: Run VM setup scripts
+        if: ${{ inputs.vm_id }}
+        env:
+          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
+        run: |
+          set -euo pipefail
+          while IFS= read -r script_json; do
+            script="$(jq -r . <<< "$script_json")"
+            bash -euo pipefail -c "$script"
+          done < <(jq -c '.startup.setup_scripts[]? // empty' "$VM_SPEC_PATH")
+
       - name: Restore per-VM browser profile
-        if: ${{ inputs.vm_id && inputs.worker_mode == 'browser' }}
+        if: ${{ inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' }}
         env:
           GH_TOKEN: ${{ github.token }}
           VM_ID: ${{ inputs.vm_id }}
+          VM_LIFECYCLE_MODE: ${{ env.VM_LIFECYCLE_MODE }}
           PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
           PROFILE_RELEASE: vm-profile-${{ inputs.vm_id }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
