@@ -37,3 +37,10 @@ test("each recovery run can replace a stuck prior guard", async () => {
   assert.match(workflow, /group: \$\{\{ github\.workflow \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy-browser-session' \}\}-\$\{\{ github\.run_id \}\}/);
   assert.match(workflow, /cancel-in-progress: false/);
 });
+
+test("push handoff cancels active legacy runs without waiting on gh run cancel", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  assert.match(workflow, /gh api --method POST "repos\/\$REPO\/actions\/runs\/\$stale_run_id\/cancel"/);
+  assert.doesNotMatch(workflow, /gh run cancel "\$stale_run_id"/);
+  assert.match(workflow, /timeout-minutes: 2/);
+});
