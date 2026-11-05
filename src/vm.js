@@ -477,8 +477,10 @@ async function connectRelay(uri) {
         authenticated = true;
         connected = true;
         console.log(`Interactive VM authenticated and connected to utils as ${workerId}`);
-        console.log(`Shared Chromium is ready on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
-        void bootstrapBrowserMcpAfterCdp();
+        if (workerMode === "browser") {
+          console.log(`Shared Chromium is ready on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
+          void bootstrapBrowserMcpAfterCdp();
+        }
         heartbeat = setInterval(() => {
           if (websocket.readyState === WebSocket.OPEN) {
             websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
@@ -513,6 +515,10 @@ async function connectRelay(uri) {
       }
       if (message.type === "vm.desktop.stop") {
         disconnectVnc(String(message.clientId ?? ""));
+        return;
+      }
+      if (message.type === "vm.shutdown") {
+        void shutdown();
         return;
       }
       if (message.type === "vm.command") {
