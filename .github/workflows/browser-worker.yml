@@ -627,7 +627,7 @@ jobs:
           fi
 
           if [ "$WORKER_MODE" = "browser" ]; then
-            for attempt in $(seq 1 300); do
+            for attempt in $(seq 1 600); do
               if grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
                 echo "Interactive VM relay is connected"
                 break
@@ -669,6 +669,7 @@ jobs:
           cp -a "$PROFILE_DIR/." "$stage/browser-worker-profile/"
           rm -f "$stage/browser-worker-profile/SingletonLock" "$stage/browser-worker-profile/SingletonCookie" "$stage/browser-worker-profile/SingletonSocket" "$stage/browser-worker-profile/DevToolsActivePort"
           rm -rf "$stage/browser-worker-profile/Default/Cache" "$stage/browser-worker-profile/Default/Code Cache" "$stage/browser-worker-profile/Default/GPUCache" "$stage/browser-worker-profile/Crashpad" "$stage/browser-worker-profile/Crash Reports"
+          find "$stage/browser-worker-profile" -maxdepth 1 -type f -name '.org.chromium.*' -delete
           tar -czf "$PROFILE_OUTPUT_DIR/profile.tar.gz" -C "$stage" browser-worker-profile
           node --input-type=module <<'NODE'
           import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
