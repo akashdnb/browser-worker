@@ -258,7 +258,7 @@ jobs:
           if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
 
       - name: Install Chromium and OS dependencies
-        if: ${{ steps.bootstrap.outputs.worker_mode == 'browser' }}
+        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
         run: npx playwright install --with-deps chromium
 
       - name: Run VM setup scripts
