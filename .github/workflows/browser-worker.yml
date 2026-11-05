@@ -546,6 +546,10 @@ jobs:
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
           WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
           WORKER_SIZE: ${{ inputs.size || 'standard' }}
+          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ inputs.vm_id && format('{0}/vm-profile-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-profile', github.workspace) }}
+          BROWSER_WORKER_PROFILE_DIR: ${{ inputs.vm_id && format('{0}/vm-profile-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-profile', github.workspace) }}
+          BROWSER_WORKER_CHECKPOINT_DIR: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-checkpoint', github.workspace) }}
+          BROWSER_WORKER_STATE_FILE: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}/storage-state.json', runner.temp, inputs.vm_id) || 'browser-worker-state/storage-state.json' }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
