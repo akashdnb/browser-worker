@@ -452,14 +452,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VM_ID: ${{ inputs.vm_id }}
-          VM_LIFECYCLE_MODE: ${{ steps.bootstrap.outputs.worker_mode && 'persistent' || 'on_demand' }}
           PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
           PROFILE_RELEASE: vm-profile-${{ inputs.vm_id }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
-          UTILS_BROWSER_WORKER_TOKEN: ${{ env.VM_WORKER_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$PROFILE_DIR"
+          if [ "$VM_LIFECYCLE_MODE" != "persistent" ]; then
+            echo "Profile persistence is disabled for $VM_LIFECYCLE_MODE VM."
+            exit 0
+          fi
           if [ -z "$BROWSER_WORKER_PROFILE_ENCRYPTION_KEY" ]; then
             echo "::error::Set BROWSER_WORKER_PROFILE_ENCRYPTION_KEY in browser-worker repository secrets to persist per-VM browser profiles."
             exit 1
@@ -509,11 +511,7 @@ jobs:
 
       - name: Run browser worker and interactive desktop
         env:
-          UTILS_BROWSER_WORKER_URL: https://utils-l1pw.onrender.com/browser-worker
-          UTILS_VM_FLEET_URL: wss://utils-l1pw.onrender.com/vm-fleet-worker
-          UTILS_BROWSER_WORKER_TOKEN: ${{ inputs.worker_token || secrets.UTILS_BROWSER_WORKER_TOKEN }}
           VM_WORKER_ID: ${{ inputs.vm_id || format('github-{0}', github.run_id) }}
-          UTILS_VM_FLEET_URL: https://utils-l1pw.onrender.com/vm-fleet-worker
           VM_ID: ${{ inputs.vm_id || '' }}
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
           WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
@@ -525,8 +523,6 @@ jobs:
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
-          WORKER_MAX_SECONDS: "19800"
-          WORKER_RENEWAL_LEAD_SECONDS: "900"
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
@@ -536,15 +532,21 @@ jobs:
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Utils browser worker URL is missing" && exit 1)
           test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Utils per-instance worker token is missing" && exit 1)
           test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
-          test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
+          if [ "$WORKER_MODE" = "browser" ]; then
+            test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
+          fi
           echo "Connecting interactive VM to ${UTILS_BROWSER_WORKER_URL%/browser-worker}"
 
           if [ "$WORKER_MODE" = "browser" ]; then
             bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
             vm_pid=$!
-            node src/profile-checkpoint-runner.mjs &
-            checkpoint_pid=$!
-            trap 'kill "$vm_pid" "$checkpoint_pid" 2>/dev/null || true; wait "$vm_pid" "$checkpoint_pid" 2>/dev/null || true' EXIT
+            if [ "$VM_LIFECYCLE_MODE" = "persistent" ] || [ -z "$VM_ID" ]; then
+              node src/profile-checkpoint-runner.mjs &
+              checkpoint_pid=$!
+            else
+              checkpoint_pid=""
+            fi
+            trap 'kill "$vm_pid" ${checkpoint_pid:-} 2>/dev/null || true; wait "$vm_pid" ${checkpoint_pid:-} 2>/dev/null || true' EXIT
           else
             vm_pid=""
             checkpoint_pid=""
