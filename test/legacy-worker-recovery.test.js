@@ -15,7 +15,7 @@ test("legacy recovery guard skips cleanly when a worker is already active", asyn
 
 test("fleet VM guards do not serialize behind the legacy worker guard", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /group: browser-worker-guard-\$\{\{ github\.ref \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy' \}\}-v5/);
+  assert.match(workflow, /group: browser-worker-guard-\$\{\{ github\.ref \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy' \}\}-v6/);
 });
 
 test("stale queued legacy runs do not block recovery", async () => {
@@ -38,10 +38,11 @@ test("each recovery run can replace a stuck prior guard", async () => {
   assert.match(workflow, /cancel-in-progress: false/);
 });
 
-test("push handoff cancels active legacy runs without waiting on gh run cancel", async () => {
+test("push handoff replaces the legacy worker through its concurrency group", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /gh api --method POST "repos\/\$REPO\/actions\/runs\/\$stale_run_id\/cancel"/);
-  assert.doesNotMatch(workflow, /gh run cancel "\$stale_run_id"/);
+  assert.match(workflow, /Push handoff uses the legacy browser job concurrency group/);
+  assert.match(workflow, /should_start=true/);
+  assert.match(workflow, /cancel-in-progress:.*github\.event_name == 'push'/);
   assert.match(workflow, /timeout-minutes: 2/);
 });
 
