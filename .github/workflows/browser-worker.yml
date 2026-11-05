@@ -318,7 +318,7 @@ jobs:
           {
             echo "WORKER_MODE=browser"
             echo "UTILS_BROWSER_WORKER_TOKEN=$DEFAULT_WORKER_TOKEN"
-            echo "UTILS_BROWSER_WORKER_URL=https://utils-l1pw.onrender.com/browser-worker"
+            echo "UTILS_BROWSER_WORKER_URL=https://utils-zkiy.onrender.com/browser-worker"
           } >> "$GITHUB_ENV"
           if [ -n "$DEFAULT_PROFILE_KEY" ]; then
             echo "BROWSER_WORKER_PROFILE_ENCRYPTION_KEY=$DEFAULT_PROFILE_KEY" >> "$GITHUB_ENV"
