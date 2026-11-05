@@ -44,14 +44,14 @@ jobs:
           release_tag="vm-profile-$vm_id"
           asset_name="browser-worker-profile-$RUN_ID-$RUN_ATTEMPT.tar.gz.enc"
           cp "$archive" "$RUNNER_TEMP/$asset_name"
-          if ! gh release view "$release_tag" >/dev/null 2>&1; then
-            gh release create "$release_tag" --draft --title "Encrypted browser profile $vm_id" --notes "Automatically managed encrypted profile checkpoint for Utils VM $vm_id."
+          if ! gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$release_tag" --repo "$GITHUB_REPOSITORY" --draft --title "Encrypted browser profile $vm_id" --notes "Automatically managed encrypted profile checkpoint for Utils VM $vm_id."
           fi
-          gh release upload "$release_tag" "$RUNNER_TEMP/$asset_name" --clobber
+          gh release upload "$release_tag" "$RUNNER_TEMP/$asset_name" --repo "$GITHUB_REPOSITORY" --clobber
           mapfile -t old_assets < <(
-            gh release view "$release_tag" --json assets --jq '.assets[].name | select(startswith("browser-worker-profile-") and endswith(".tar.gz.enc"))' |
+            gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name | select(startswith("browser-worker-profile-") and endswith(".tar.gz.enc"))' |
             sort -r | tail -n +4
           )
           for asset in "${old_assets[@]}"; do
-            gh release delete-asset "$release_tag" "$asset" --yes
+            gh release delete-asset "$release_tag" "$asset" --repo "$GITHUB_REPOSITORY" --yes
           done
