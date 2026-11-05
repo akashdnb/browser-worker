@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
@@ -15,7 +16,7 @@ const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10
 const chromium = process.env.CHROMIUM_BIN;
 const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
 const workerMode = process.env.WORKER_MODE ?? "browser";
-const workerSocketPath = workerMode === "compute" ? "/vm-fleet-worker" : "/vm-worker";
+const workerSocketPath = process.env.VM_ID ? "/vm-fleet-worker" : "/vm-worker";
 // Keep Chromium startup, the Playwright client, and the watchdog on one timeout.
 // A restored profile plus extension initialization can legitimately take longer
 // than the old 30-second hard-coded probe.
@@ -519,6 +520,50 @@ async function connectRelay(uri) {
       }
       if (message.type === "vm.shutdown") {
         void shutdown();
+        return;
+      }
+      if (message.type === "vm.task.execute") {
+        try {
+          const result = await handleCommand({ action: "exec", command: message.command, timeout_seconds: message.timeout_seconds });
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({
+              type: "vm.task.result",
+              request_id: message.request_id,
+              result: { returncode: result.returncode ?? (result.ok ? 0 : 1), stdout: result.stdout ?? "", stderr: result.stderr ?? result.error ?? "" },
+            }));
+          }
+        } catch (error) {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: "vm.task.error", request_id: message.request_id, error: error instanceof Error ? error.message : String(error) }));
+          }
+        }
+        return;
+      }
+      if (message.type === "vm.file.write") {
+        try {
+          const data = Buffer.from(String(message.content_base64 || ""), "base64");
+          if (data.length > 1_048_576) throw new Error("file payload exceeds 1 MB");
+          await mkdir(path.dirname(message.path), { recursive: true });
+          await writeFile(message.path, data, { mode: 0o600 });
+          websocket.send(JSON.stringify({ type: "vm.file.result", request_id: message.request_id, bytes_written: data.length }));
+        } catch (error) {
+          websocket.send(JSON.stringify({ type: "vm.file.error", request_id: message.request_id, error: error instanceof Error ? error.message : String(error) }));
+        }
+        return;
+      }
+      if (message.type === "vm.file.read") {
+        try {
+          const data = await readFile(message.path);
+          if (data.length > 1_048_576) throw new Error("file payload exceeds 1 MB");
+          websocket.send(JSON.stringify({ type: "vm.file.result", request_id: message.request_id, content_base64: data.toString("base64"), bytes_read: data.length }));
+        } catch (error) {
+          websocket.send(JSON.stringify({ type: "vm.file.error", request_id: message.request_id, error: error instanceof Error ? error.message : String(error) }));
+        }
+        return;
+      }
+      if (message.type === "vm.shutdown") {
+        void shutdown();
+        websocket.close(1000, "VM shutdown requested");
         return;
       }
       if (message.type === "vm.command") {
