@@ -247,7 +247,7 @@ jobs:
           if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
 
       - name: Install Chromium and OS dependencies
-        if: ${{ (steps.bootstrap.outputs.worker_mode || 'browser') == 'browser' }}
+        if: ${{ steps.bootstrap.outputs.worker_mode == 'browser' }}
         run: npx playwright install --with-deps chromium
 
       - name: Run VM setup scripts
@@ -262,7 +262,7 @@ jobs:
           done < <(jq -c '.startup.setup_scripts[]? // empty' "$VM_SPEC_PATH")
 
       - name: Set up interactive desktop dependencies
-        if: ${{ inputs.worker_mode != 'compute' }}
+        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11vnc openbox xdotool
@@ -514,8 +514,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
-          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 20 --json databaseId --jq '.[].databaseId'); do
-            if [ "$run_id" != "$CURRENT_RUN_ID" ]; then gh run cancel "$run_id" || true; fi
+          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if [ "$run_id" = "$CURRENT_RUN_ID" ]; then continue; fi
+            job_names="$(gh run view "$run_id" --json jobs --jq '.jobs[].name' 2>/dev/null || true)"
+            if printf '%s\n' "$job_names" | grep -q '^VM '; then
+              echo "::notice::Leaving fleet VM run $run_id active during legacy worker deployment."
+              continue
+            fi
+            gh run cancel "$run_id" || true
           done
 
       - name: Run browser worker and interactive desktop
@@ -523,7 +529,7 @@ jobs:
           VM_WORKER_ID: ${{ inputs.vm_id || format('github-{0}', github.run_id) }}
           VM_ID: ${{ inputs.vm_id || '' }}
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
+          WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
           WORKER_SIZE: ${{ inputs.size || 'standard' }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
@@ -532,7 +538,6 @@ jobs:
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
-          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
           VM_CHROMIUM_DEBUG_PORT: "9222"
