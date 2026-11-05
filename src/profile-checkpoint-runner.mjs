@@ -12,7 +12,7 @@ const shouldUpload = process.env.GITHUB_ACTIONS === "true";
 if (shouldUpload && !process.env.GH_TOKEN) {
   throw new Error("GH_TOKEN is required to upload encrypted browser profile checkpoints");
 }
-const releaseTag = "browser-worker-state";
+const releaseTag = process.env.BROWSER_WORKER_STATE_RELEASE_TAG ?? "browser-worker-state";
 let releaseReady = false;
 let lastUploadedAt = 0;
 
