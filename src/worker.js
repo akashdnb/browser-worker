@@ -25,8 +25,8 @@ if (!Number.isFinite(maxSeconds) || maxSeconds < 60 || maxSeconds > 21000) {
 if (!Number.isFinite(renewalLeadSeconds) || renewalLeadSeconds < 60 || renewalLeadSeconds >= maxSeconds) {
   throw new Error("WORKER_RENEWAL_LEAD_SECONDS must be at least 60 and less than WORKER_MAX_SECONDS");
 }
-if (!githubToken || !githubRepository || !githubRunId) {
-  throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_RUN_ID are required for worker self-renewal");
+if (!process.env.VM_ID && (!githubToken || !githubRepository || !githubRunId)) {
+  throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_RUN_ID are required for legacy worker self-renewal");
 }
 if (!Number.isFinite(cdpTimeoutMs) || cdpTimeoutMs < 1000) {
   throw new Error("PLAYWRIGHT_MCP_CDP_TIMEOUT must be at least 1000ms");
