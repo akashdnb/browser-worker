@@ -42,7 +42,7 @@ test("push handoff can replace an orphaned legacy run without waiting on its con
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   assert.match(workflow, /Push handoff uses the legacy browser job concurrency group/);
   assert.match(workflow, /should_start=true/);
-  assert.match(workflow, /utils-vm-legacy-browser-session-\$\{\{ github\.run_id \}\}/);
+  assert.match(workflow, /format\('utils-vm-legacy-browser-session-\{0\}', github\.run_id\)/);
   assert.match(workflow, /cancel-in-progress: \$\{\{ inputs\.vm_id != '' \}\}/);
   assert.match(workflow, /gh run cancel "\$run_id"/);
   assert.match(workflow, /timeout-minutes: 2/);
