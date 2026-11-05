@@ -22,7 +22,7 @@ test("VM shutdown waits for Chromium to flush session files before stopping desk
 
 test("VM profile checkpoint uses a stable workspace profile path", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /PLAYWRIGHT_MCP_USER_DATA_DIR: .*github\.workspace.*browser-worker-state\/live-profile/);
+  assert.match(workflow, /PLAYWRIGHT_MCP_USER_DATA_DIR: .*browser-worker-state\/live-profile.*github\.workspace/);
   assert.match(workflow, /BROWSER_WORKER_CHECKPOINT_SECONDS: "60"/);
 });
 
