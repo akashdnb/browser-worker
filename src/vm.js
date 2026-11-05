@@ -17,6 +17,10 @@ const chromium = process.env.CHROMIUM_BIN;
 const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
 const workerMode = process.env.WORKER_MODE ?? "browser";
 const workerSocketPath = process.env.VM_ID ? "/vm-fleet-worker" : "/vm-worker";
+const vmLifetimeMinutes = Number.parseInt(process.env.VM_MAX_LIFETIME_MINUTES ?? "345", 10);
+if (!Number.isInteger(vmLifetimeMinutes) || vmLifetimeMinutes < 1 || vmLifetimeMinutes > 350) {
+  throw new Error("VM_MAX_LIFETIME_MINUTES must be between 1 and 350");
+}
 // Keep Chromium startup, the Playwright client, and the watchdog on one timeout.
 // A restored profile plus extension initialization can legitimately take longer
 // than the old 30-second hard-coded probe.
@@ -34,6 +38,7 @@ if (workerMode === "browser" && !chromium) throw new Error("CHROMIUM_BIN is requ
 const processes = [];
 const vncSockets = new Map();
 let stopping = false;
+let relayWebSocket = null;
 
 function start(command, env = process.env, { critical = false } = {}) {
   const child = spawn(command[0], command.slice(1), { env, stdio: ["ignore", "inherit", "inherit"] });
@@ -321,7 +326,7 @@ async function handleCommand(payload) {
   }
   if (action === "exec") {
     const command = payload?.command;
-    if (typeof command !== "string" || !command.trim() || command.length > 4000) throw new Error("command must be a non-empty string of at most 4000 characters");
+    if (typeof command !== "string" || !command.trim() || command.length > 20000) throw new Error("command must be a non-empty string of at most 20000 characters");
     return await runCommand(command, payload?.timeout_seconds);
   }
   if (action === "read_file") {
@@ -444,6 +449,7 @@ async function connectRelay(uri) {
       maxPayload: 16 * 1024 * 1024,
       handshakeTimeout: 15_000,
     });
+    relayWebSocket = websocket;
     let heartbeat;
     let authTimer;
     let connected = false;
@@ -633,6 +639,9 @@ async function shutdown() {
   if (stopping) return;
   stopping = true;
   disconnectAllVnc();
+  if (relayWebSocket && relayWebSocket.readyState === WebSocket.OPEN) {
+    try { relayWebSocket.close(1000, "VM lifecycle ended"); } catch {}
+  }
 
   // Ask Chromium to exit first and give it time to flush its session/tab files.
   // Killing its parent VM relay must not race Chromium's clean profile shutdown.
@@ -663,5 +672,11 @@ async function shutdown() {
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 
+const lifetimeTimer = setTimeout(() => {
+  console.log(`VM lifetime limit reached after ${vmLifetimeMinutes} minutes; closing the runner worker.`);
+  void shutdown();
+}, vmLifetimeMinutes * 60_000);
+lifetimeTimer.unref();
 await main();
+clearTimeout(lifetimeTimer);
 await shutdown();
