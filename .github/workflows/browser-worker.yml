@@ -1,4 +1,4 @@
-name: Browser Worker
+name: Browser Worker Primary
 
 on:
   workflow_dispatch:
@@ -45,22 +45,30 @@ jobs:
             exit 0
           fi
 
-          active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
-          if [ -n "$active_run_id" ] && [ "$EVENT_NAME" = "push" ]; then
-            echo "::notice::Replacing stale Browser Worker run $active_run_id after a deployment push."
-            gh run cancel "$active_run_id" --repo "$REPO" || true
+          if [ "$EVENT_NAME" = "push" ]; then
+            # A replacement push must evict both a running worker and any older
+            # push still waiting in the same GitHub Actions concurrency group.
+            for state in in_progress queued; do
+              for run_id in $(gh run list --repo "$REPO" --workflow browser-worker.yml --status "$state" --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId"); do
+                echo "::notice::Cancelling stale Browser Worker run $run_id ($state) before handoff."
+                gh run cancel "$run_id" --repo "$REPO" || true
+              done
+            done
             for attempt in $(seq 1 60); do
-              status="$(gh run view "$active_run_id" --repo "$REPO" --json status --jq '.status' 2>/dev/null || true)"
-              if [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then break; fi
+              active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+              queued_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status queued --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+              if [ -z "$active_run_id" ] && [ -z "$queued_run_id" ]; then break; fi
               sleep 2
             done
-            active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
           fi
-          if [ -n "$active_run_id" ]; then
-            echo "::notice::Skipping $EVENT_NAME start: Browser Worker run $active_run_id is already active."
+
+          active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          queued_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status queued --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          if [ -n "$active_run_id" ] || [ -n "$queued_run_id" ]; then
+            echo "::error::Refusing to start while another Browser Worker run is active (active=$active_run_id queued=$queued_run_id)."
             echo "should_start=false" >> "$GITHUB_OUTPUT"
           else
-            echo "No other Browser Worker run is active"
+            echo "No other Browser Worker run is active or queued"
             echo "should_start=true" >> "$GITHUB_OUTPUT"
           fi
 
