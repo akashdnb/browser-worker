@@ -110,6 +110,7 @@ jobs:
     if: needs.guard.outputs.should_start == 'true'
     runs-on: ${{ inputs.size == 'large' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
     timeout-minutes: 350
+    name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
     concurrency:
       group: utils-vm-${{ inputs.vm_id || 'legacy-browser-session' }}
       cancel-in-progress: false
@@ -365,8 +366,10 @@ jobs:
       - name: Run browser worker and interactive desktop
         env:
           UTILS_BROWSER_WORKER_URL: https://utils-l1pw.onrender.com/browser-worker
+          UTILS_VM_FLEET_URL: wss://utils-l1pw.onrender.com/vm-fleet-worker
           UTILS_BROWSER_WORKER_TOKEN: ${{ inputs.worker_token || secrets.UTILS_BROWSER_WORKER_TOKEN }}
           VM_WORKER_ID: ${{ inputs.vm_id || format('github-{0}', github.run_id) }}
+          UTILS_VM_FLEET_URL: https://utils-l1pw.onrender.com/vm-fleet-worker
           VM_ID: ${{ inputs.vm_id || '' }}
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
           WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
