@@ -54,6 +54,7 @@ test("checkpoint is valid, omits locks/cache, and preserves live profile", async
     });
     assert.match(listing, /browser-worker-profile\/Default\/Sessions\/Tabs_1/);
     assert.doesNotMatch(listing, /SingletonLock/);
+    assert.equal(listing.includes(".org.chromium."), false);
     assert.doesNotMatch(listing, /Default\/Cache\//);
   } finally {
     await rm(root, { recursive: true, force: true });
