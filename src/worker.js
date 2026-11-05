@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { parseWorkerTiming } from "./worker-config.js";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
 import net from "node:net";
@@ -9,8 +10,7 @@ const workerToken = process.env.UTILS_BROWSER_WORKER_TOKEN;
 const mcpUrl = process.env.PLAYWRIGHT_MCP_URL ?? "http://localhost:8931/mcp";
 const cdpEndpoint = process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
 const cdpTimeoutMs = Number.parseInt(process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT ?? "120000", 10);
-const maxSeconds = Number.parseInt(process.env.WORKER_MAX_SECONDS ?? "20400", 10);
-const renewalLeadSeconds = Number.parseInt(process.env.WORKER_RENEWAL_LEAD_SECONDS ?? "900", 10);
+const { maxSeconds, renewalLeadSeconds } = parseWorkerTiming(process.env);
 const githubToken = process.env.GITHUB_TOKEN;
 const githubRepository = process.env.GITHUB_REPOSITORY;
 const githubRef = process.env.GITHUB_REF_NAME ?? "main";
@@ -21,9 +21,6 @@ if (!gatewayUrl || !workerToken) {
 }
 if (!Number.isFinite(maxSeconds) || maxSeconds < 60 || maxSeconds > 21000) {
   throw new Error("WORKER_MAX_SECONDS must be between 60 and 21000");
-}
-if (!Number.isFinite(renewalLeadSeconds) || renewalLeadSeconds < 60 || renewalLeadSeconds >= maxSeconds) {
-  throw new Error("WORKER_RENEWAL_LEAD_SECONDS must be at least 60 and less than WORKER_MAX_SECONDS");
 }
 if (!process.env.VM_ID && (!githubToken || !githubRepository || !githubRunId)) {
   throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_RUN_ID are required for legacy worker self-renewal");
