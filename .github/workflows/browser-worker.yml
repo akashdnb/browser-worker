@@ -570,7 +570,7 @@ jobs:
           BROWSER_WORKER_PROFILE_DIR: ${{ inputs.vm_id && format('{0}/vm-profile-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-profile', github.workspace) }}
           BROWSER_WORKER_CHECKPOINT_DIR: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-checkpoint', github.workspace) }}
           BROWSER_WORKER_STATE_FILE: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}/storage-state.json', runner.temp, inputs.vm_id) || 'browser-worker-state/storage-state.json' }}
-          BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
+          BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ !inputs.vm_id && secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON || '' }}
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
