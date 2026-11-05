@@ -175,33 +175,6 @@ jobs:
             echo "::warning::VM has secret_refs; values are not injected until a supported secret resolver is configured."
           fi
 
-      - name: Validate requested VM resources
-        if: ${{ inputs.vm_id }}
-        env:
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          WORKER_SIZE: ${{ inputs.size || 'standard' }}
-        run: |
-          node --input-type=module <<'NODE'
-          const fs = await import('node:fs/promises');
-          const spec = JSON.parse(await fs.readFile(process.env.VM_SPEC_PATH, 'utf8'));
-          const cpu = Number(spec.resources?.cpu ?? 2);
-          const memory = Number(spec.resources?.memory_mb ?? 4096);
-          const disk = Number(spec.resources?.disk_gb ?? 30);
-          const gpu = spec.resources?.gpu;
-          const size = process.env.WORKER_SIZE;
-          const profiles = {
-            standard: {cpu: 2, memory_mb: 8192, disk_gb: 14},
-            large: {cpu: 8, memory_mb: 32768, disk_gb: 32},
-          };
-          const profile = profiles[size];
-          if (!profile) throw new Error("Unsupported GitHub runner size");
-          if (gpu) throw new Error("GPU is not available in the configured GitHub-hosted runner profiles");
-          if (cpu > profile.cpu || memory > profile.memory_mb || disk > profile.disk_gb) {
-            throw new Error(`Requested resources exceed ${size} GitHub runner: ${JSON.stringify(profile)}`);
-          }
-          NODE
-
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -241,6 +214,18 @@ jobs:
       - name: Install Chromium and OS dependencies
         if: ${{ inputs.worker_mode != 'compute' }}
         run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium and OS dependencies
+        if: ${{ (steps.bootstrap.outputs.worker_mode || 'browser') == 'browser' }}
+        run: npx playwright install --with-deps chromium
+
+      - name: Resolve Chromium executable
+        if: ${{ (steps.bootstrap.outputs.worker_mode || 'browser') == 'browser' }}
+        run: |
+          chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
+          test -n "$chromium_bin"
+          echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
+          echo "Using shared interactive Chromium at $chromium_bin"
 
       - name: Run VM setup scripts
         if: ${{ inputs.vm_id }}
