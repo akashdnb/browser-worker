@@ -32,7 +32,7 @@ if (!Number.isFinite(cdpTimeoutMs) || cdpTimeoutMs < 1000) {
   throw new Error("PLAYWRIGHT_MCP_CDP_TIMEOUT must be at least 1000ms");
 }
 
-const workerId = randomUUID();
+const workerId = process.env.VM_ID || process.env.VM_WORKER_ID || randomUUID();
 let shuttingDown = false;
 let reconnectTimer;
 let renewalTimer;
@@ -417,7 +417,7 @@ await waitForCdp();
 await waitForMcp();
 await ensureUpstreamInitialized();
 connectGateway();
-scheduleReplacement();
+if (!process.env.VM_ID) scheduleReplacement();
 console.log(`Worker ${workerId} started; lifetime ${maxSeconds}s; shared browser=${cdpEndpoint}`);
 setTimeout(() => {
   console.log("Worker lifecycle limit reached; stopping for scheduled replacement");
