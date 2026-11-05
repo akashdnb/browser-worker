@@ -254,38 +254,42 @@ jobs:
         env:
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
           WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
+          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y jq curl ca-certificates
+          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get update
+          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y jq curl ca-certificates
           VM_SPEC="$(cat "$VM_SPEC_PATH" 2>/dev/null || echo '{}')"
           mapfile -t apt_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]?')
-          if [ "${#apt_packages[@]}" -gt 0 ]; then sudo apt-get install -y -- "${apt_packages[@]}"; fi
+          if [ "${#apt_packages[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y -- "${apt_packages[@]}"; fi
           mapfile -t pip_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_pip[]?')
-          if [ "${#pip_packages[@]}" -gt 0 ]; then python -m pip install --user --break-system-packages "${pip_packages[@]}"; fi
+          if [ "${#pip_packages[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" python -m pip install --user --break-system-packages "${pip_packages[@]}"; fi
           mapfile -t npm_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_npm[]?')
-          if [ "${#npm_packages[@]}" -gt 0 ]; then npm install --global "${npm_packages[@]}"; fi
+          if [ "${#npm_packages[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" npm install --global "${npm_packages[@]}"; fi
           mapfile -t cli_tools < <(echo "$VM_SPEC" | jq -r '.runtime.cli_tools[]?')
-          if [ "${#cli_tools[@]}" -gt 0 ]; then sudo apt-get install -y -- "${cli_tools[@]}"; fi
+          if [ "${#cli_tools[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y -- "${cli_tools[@]}"; fi
           if [ "$WORKER_MODE" = "browser" ]; then
-            npm install --no-save ws@^8.18.0 @playwright/mcp@0.0.83
+            timeout "$VM_STARTUP_TIMEOUT_SECONDS" npm install --no-save ws@^8.18.0 @playwright/mcp@0.0.83
           else
-            npm install --no-save ws@^8.18.0
+            timeout "$VM_STARTUP_TIMEOUT_SECONDS" npm install --no-save ws@^8.18.0
           fi
 
       - name: Install Chromium and OS dependencies
         if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
-        run: npx playwright install --with-deps chromium
+        env:
+          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
+        run: timeout "$VM_STARTUP_TIMEOUT_SECONDS" npx playwright install --with-deps chromium
 
       - name: Run VM setup scripts
         if: ${{ inputs.vm_id }}
         env:
           VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
+          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
         run: |
           set -euo pipefail
           while IFS= read -r script_json; do
             script="$(jq -r . <<< "$script_json")"
-            bash -euo pipefail -c "$script"
+            timeout "$VM_STARTUP_TIMEOUT_SECONDS" bash -euo pipefail -c "$script"
           done < <(jq -c '.startup.setup_scripts[]? // empty' "$VM_SPEC_PATH")
 
       - name: Set up interactive desktop dependencies
