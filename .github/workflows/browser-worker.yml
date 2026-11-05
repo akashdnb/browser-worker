@@ -90,8 +90,7 @@ jobs:
                 created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo 0)"
                 age_seconds=$(( $(date +%s) - created_epoch ))
                 if [ "$created_epoch" -gt 0 ] && [ "$age_seconds" -gt 600 ]; then
-                  echo "::notice::Cancelling stale queued legacy Browser Worker run $candidate."
-                  gh run cancel "$candidate" --repo "$REPO" || true
+                  echo "::notice::Ignoring stale queued legacy Browser Worker run $candidate so it cannot block recovery."
                   continue
                 fi
               fi
