@@ -576,14 +576,16 @@ jobs:
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
           PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
-          GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ !inputs.vm_id && github.token || '' }}
+          GH_TOKEN: ${{ !inputs.vm_id && github.token || '' }}
           VM_CHROMIUM_DEBUG_PORT: "9222"
           DISPLAY: ":99"
         run: |
           test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Utils browser worker URL is missing" && exit 1)
           test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Utils per-instance worker token is missing" && exit 1)
-          test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
+          if [ -z "$VM_ID" ]; then
+            test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
+          fi
           if [ "$WORKER_MODE" = "browser" ]; then
             test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
           fi
@@ -592,10 +594,13 @@ jobs:
           if [ "$WORKER_MODE" = "browser" ]; then
             bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
             vm_pid=$!
-            if { [ "$VM_LIFECYCLE_MODE" = "persistent" ] && [ "$VM_BROWSER_PERSISTENT_PROFILE" = "true" ]; } || [ -z "$VM_ID" ]; then
+            if [ -z "$VM_ID" ]; then
               node src/profile-checkpoint-runner.mjs &
               checkpoint_pid=$!
             else
+              # Managed VM profiles are published from a separate workflow after
+              # this untrusted runner exits; never expose a repository write token
+              # to arbitrary VM commands.
               checkpoint_pid=""
             fi
             trap 'kill "$vm_pid" ${checkpoint_pid:-} 2>/dev/null || true; wait "$vm_pid" ${checkpoint_pid:-} 2>/dev/null || true' EXIT
@@ -627,6 +632,54 @@ jobs:
           else
             node src/vm.js
           fi
+
+      - name: Prepare encrypted VM browser profile artifact
+        if: ${{ always() && inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' && env.VM_LIFECYCLE_MODE == 'persistent' && env.VM_BROWSER_PERSISTENT_PROFILE == 'true' }}
+        env:
+          PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
+          PROFILE_OUTPUT_DIR: ${{ runner.temp }}/vm-profile-artifact
+          PROFILE_KEY: ${{ env.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$PROFILE_DIR/Local State" ] || [ ! -s "$PROFILE_DIR/Default/Preferences" ]; then
+            echo "::warning::No complete Chromium profile is available to checkpoint."
+            exit 0
+          fi
+          test -n "$PROFILE_KEY" || { echo "::error::Browser profile encryption key is unavailable"; exit 1; }
+          stage="$RUNNER_TEMP/vm-profile-stage"
+          mkdir -p "$stage/browser-worker-profile" "$PROFILE_OUTPUT_DIR"
+          cp -a "$PROFILE_DIR/." "$stage/browser-worker-profile/"
+          rm -f "$stage/browser-worker-profile/SingletonLock" "$stage/browser-worker-profile/SingletonCookie" "$stage/browser-worker-profile/SingletonSocket" "$stage/browser-worker-profile/DevToolsActivePort"
+          rm -rf "$stage/browser-worker-profile/Default/Cache" "$stage/browser-worker-profile/Default/Code Cache" "$stage/browser-worker-profile/Default/GPUCache" "$stage/browser-worker-profile/Crashpad" "$stage/browser-worker-profile/Crash Reports"
+          tar -czf "$PROFILE_OUTPUT_DIR/profile.tar.gz" -C "$stage" browser-worker-profile
+          node --input-type=module <<'NODE'
+          import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
+          import { createReadStream, createWriteStream } from "node:fs";
+          import { appendFile, writeFile } from "node:fs/promises";
+          import { pipeline } from "node:stream/promises";
+          const secret = process.env.PROFILE_KEY;
+          if (typeof secret !== "string" || Buffer.byteLength(secret) < 32) throw new Error("Profile encryption key must be at least 32 bytes");
+          const key = Buffer.from(hkdfSync("sha256", Buffer.from(secret), Buffer.from("utils-browser-worker-profile-v1"), Buffer.from("github-actions-artifact-encryption"), 32));
+          const iv = randomBytes(12);
+          const cipher = createCipheriv("aes-256-gcm", key, iv);
+          const input = process.env.PROFILE_OUTPUT_DIR + "/profile.tar.gz";
+          const output = process.env.PROFILE_OUTPUT_DIR + "/browser-worker-profile.tar.gz.enc";
+          const header = JSON.stringify({version:1, algorithm:"aes-256-gcm", iv:iv.toString("base64")}) + "\n";
+          await writeFile(output, header, {mode:0o600});
+          await pipeline(createReadStream(input), cipher, createWriteStream(output, {flags:"a", mode:0o600}));
+          await appendFile(output, cipher.getAuthTag());
+          NODE
+          rm -f "$PROFILE_OUTPUT_DIR/profile.tar.gz"
+          rm -rf "$stage"
+
+      - name: Upload encrypted VM browser profile artifact
+        if: ${{ always() && inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' && env.VM_LIFECYCLE_MODE == 'persistent' && env.VM_BROWSER_PERSISTENT_PROFILE == 'true' && hashFiles(format('{0}/browser-worker-profile.tar.gz.enc', runner.temp + '/vm-profile-artifact')) != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-profile-${{ inputs.vm_id }}
+          path: ${{ runner.temp }}/vm-profile-artifact/browser-worker-profile.tar.gz.enc
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Prepare and encrypt browser profile artifacts
         if: ${{ always() && steps.bootstrap.outputs.worker_mode == 'browser' && !inputs.vm_id }}
