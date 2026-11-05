@@ -126,7 +126,7 @@ jobs:
         if: ${{ inputs.vm_id }}
         env:
           VM_ID: ${{ inputs.vm_id }}
-          BOOTSTRAP_URL: https://utils-l1pw.onrender.com/vm-fleet/bootstrap
+          BOOTSTRAP_URL: ${{ inputs.utils_base_url }}/vm-fleet/bootstrap
         run: |
           set -euo pipefail
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
