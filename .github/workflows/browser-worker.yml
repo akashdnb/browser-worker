@@ -124,11 +124,31 @@ jobs:
     timeout-minutes: 350
     name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
     concurrency:
-      group: utils-vm-${{ inputs.vm_id || 'legacy-browser-session' }}
-      cancel-in-progress: ${{ inputs.vm_id != '' || github.event_name == 'push' }}
+      # Fleet VMs remain serialized per VM ID. Legacy recovery runs must not
+      # be blocked by an orphaned in-progress Actions run; the push handoff
+      # step below cancels the previous legacy run as soon as this job starts.
+      group: ${{ inputs.vm_id && format('utils-vm-{0}', inputs.vm_id) || format('utils-vm-legacy-browser-session-{0}', github.run_id) }}
+      cancel-in-progress: ${{ inputs.vm_id != '' }}
     steps:
       - name: Checkout worker configuration
         uses: actions/checkout@v4
+
+      - name: Stop older worker runs after a push deployment
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if [ "$run_id" = "$CURRENT_RUN_ID" ]; then continue; fi
+            job_names="$(gh run view "$run_id" --json jobs --jq '.jobs[].name' 2>/dev/null || true)"
+            if printf '%s\n' "$job_names" | grep -q '^VM '; then
+              echo "::notice::Leaving fleet VM run $run_id active during legacy worker deployment."
+              continue
+            fi
+            gh run cancel "$run_id" || true
+          done
+
       - name: Prepare VM identity and OIDC bootstrap
         id: bootstrap
         if: ${{ inputs.vm_id }}
@@ -552,22 +572,6 @@ jobs:
           test -n "$chromium_bin"
           echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
           echo "Using shared interactive Chromium at $chromium_bin"
-
-      - name: Stop older worker runs after a push deployment
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        run: |
-          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId'); do
-            if [ "$run_id" = "$CURRENT_RUN_ID" ]; then continue; fi
-            job_names="$(gh run view "$run_id" --json jobs --jq '.jobs[].name' 2>/dev/null || true)"
-            if printf '%s\n' "$job_names" | grep -q '^VM '; then
-              echo "::notice::Leaving fleet VM run $run_id active during legacy worker deployment."
-              continue
-            fi
-            gh run cancel "$run_id" || true
-          done
 
       - name: Run browser worker and interactive desktop
         env:
