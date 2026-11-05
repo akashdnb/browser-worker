@@ -16,7 +16,7 @@ const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10
 const chromium = process.env.CHROMIUM_BIN;
 const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
 const workerMode = process.env.WORKER_MODE ?? "browser";
-const workerSocketPath = process.env.VM_ID ? "/vm-fleet-worker" : "/vm-worker";
+const workerSocketPath = process.env.VM_WORKER_SOCKET_PATH || (process.env.VM_ID ? "/vm-fleet-worker" : "/vm-worker");
 const vmLifetimeMinutes = Number.parseInt(process.env.VM_MAX_LIFETIME_MINUTES ?? "345", 10);
 if (!Number.isInteger(vmLifetimeMinutes) || vmLifetimeMinutes < 1 || vmLifetimeMinutes > 350) {
   throw new Error("VM_MAX_LIFETIME_MINUTES must be between 1 and 350");
@@ -610,6 +610,7 @@ async function main() {
   }
 
   const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}${workerSocketPath}`;
+  console.log(`Starting interactive VM relay at ${uri} for worker ${workerId}`);
   let backoffMs = 2_000;
 
   while (!stopping) {
