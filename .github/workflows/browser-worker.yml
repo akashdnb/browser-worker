@@ -134,9 +134,12 @@ jobs:
           VM_SPEC: ${{ inputs.vm_spec || '' }}
           VM_WORKER_TOKEN: ${{ inputs.worker_token || '' }}
           WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
+          WORKER_SIZE: ${{ inputs.size || 'standard' }}
           DEFAULT_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
         run: |
           if [ -n "$VM_ID" ]; then
+            test -n "$VM_SPEC" || { echo "::error::vm_spec is required for a fleet VM"; exit 1; }
+            test -n "$VM_WORKER_TOKEN" || { echo "::error::worker_token is required for a fleet VM"; exit 1; }
             echo "$VM_SPEC" > "$RUNNER_TEMP/vm-spec.json"
             echo "VM_ID=$VM_ID" >> "$GITHUB_ENV"
             echo "VM_SPEC_PATH=$RUNNER_TEMP/vm-spec.json" >> "$GITHUB_ENV"
@@ -146,8 +149,8 @@ jobs:
           else
             echo "WORKER_MODE=browser" >> "$GITHUB_ENV"
           fi
-          if [ "$WORKER_MODE" = "browser" ] && [ -z "$VM_ID" ] || [ "$WORKER_MODE" = "browser" ] && [ -z "$VM_WORKER_TOKEN" ]; then
-            test -n "$DEFAULT_WORKER_TOKEN"
+          if [ -z "$VM_ID" ] && [ "$WORKER_MODE" = "browser" ]; then
+            test -n "$DEFAULT_WORKER_TOKEN" || { echo "::error::Legacy browser worker token is missing"; exit 1; }
           fi
 
       - name: Restore previous browser profile
@@ -371,12 +374,13 @@ jobs:
           VM_CPU_REQUESTED: ${{ fromJSON(inputs.vm_spec || '{}').resources.cpu || '2' }}
           VM_MEMORY_REQUESTED_MB: ${{ fromJSON(inputs.vm_spec || '{}').resources.memory_mb || '4096' }}
           VM_DISK_REQUESTED_GB: ${{ fromJSON(inputs.vm_spec || '{}').resources.disk_gb || '30' }}
+          WORKER_SIZE: ${{ inputs.size || 'standard' }}
           BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
-          BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
+          BROWSER_WORKER_STATE_FILE: ${{ runner.temp }}/vm-checkpoint-${{ inputs.vm_id || github.run_id }}/storage-state.json
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
-          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ github.workspace }}/browser-worker-state/live-profile
-          BROWSER_WORKER_CHECKPOINT_DIR: ${{ github.workspace }}/browser-worker-state/live-checkpoint
+          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id || github.run_id }}
+          BROWSER_WORKER_CHECKPOINT_DIR: ${{ runner.temp }}/vm-checkpoint-${{ inputs.vm_id || github.run_id }}
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
