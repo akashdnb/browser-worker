@@ -3,7 +3,17 @@ import { getCdpResponse } from "./cdp-http.mjs";
 
 const cdpEndpoint = process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
 const checkIntervalMs = Number.parseInt(process.env.CDP_WATCHDOG_INTERVAL_MS ?? "10000", 10);
-const startupGraceMs = Number.parseInt(process.env.CDP_WATCHDOG_STARTUP_GRACE_MS ?? "90000", 10);
+const browserStartupTimeoutMs = Number.parseInt(
+  process.env.VM_CHROMIUM_STARTUP_TIMEOUT_MS ?? process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT ?? "120000",
+  10,
+);
+const defaultStartupGraceMs = Number.isFinite(browserStartupTimeoutMs)
+  ? Math.max(150_000, browserStartupTimeoutMs + 30_000)
+  : 150_000;
+const startupGraceMs = Number.parseInt(
+  process.env.CDP_WATCHDOG_STARTUP_GRACE_MS ?? String(defaultStartupGraceMs),
+  10,
+);
 const failureThreshold = Number.parseInt(process.env.CDP_WATCHDOG_FAILURE_THRESHOLD ?? "3", 10);
 const killTimeoutMs = Number.parseInt(process.env.CDP_WATCHDOG_KILL_TIMEOUT_MS ?? "5000", 10);
 
