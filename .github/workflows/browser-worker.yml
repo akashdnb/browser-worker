@@ -152,7 +152,8 @@ jobs:
             echo "BROWSER_WORKER_CHECKPOINT_DIR=$RUNNER_TEMP/vm-checkpoint-$VM_ID"
             echo "BROWSER_WORKER_STATE_FILE=$RUNNER_TEMP/vm-checkpoint-$VM_ID/storage-state.json"
             echo "BROWSER_WORKER_STATE_RELEASE_TAG=vm-profile-$VM_ID"
-            echo "VM_LIFECYCLE_MODE=$(jq -r '.lifecycle.mode // "on_demand"' <<< "$vm_spec")"
+            echo "VM_LIFECYCLE_MODE=$lifecycle_mode"
+            echo "VM_STARTUP_TIMEOUT_SECONDS=$(jq -r '.startup.startup_timeout_seconds // 900' <<< "$vm_spec")"
             echo "VM_BROWSER_PERSISTENT_PROFILE=$(jq -r '.browser.persistent_profile // true' <<< "$vm_spec")"
             max_lifetime="$(jq -r '.lifecycle.max_lifetime_minutes // 345' <<< "$vm_spec")"
             if [ "$max_lifetime" -gt 345 ]; then echo "::error::GitHub Actions VM maximum lifetime is 345 minutes"; exit 1; fi
@@ -286,6 +287,7 @@ jobs:
         if: ${{ !inputs.vm_id }}
         env:
           DEFAULT_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          DEFAULT_PROFILE_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
         run: |
           test -n "$DEFAULT_WORKER_TOKEN" || { echo "::error::Legacy browser worker token is missing"; exit 1; }
           {
@@ -293,6 +295,9 @@ jobs:
             echo "UTILS_BROWSER_WORKER_TOKEN=$DEFAULT_WORKER_TOKEN"
             echo "UTILS_BROWSER_WORKER_URL=https://utils-l1pw.onrender.com/browser-worker"
           } >> "$GITHUB_ENV"
+          if [ -n "$DEFAULT_PROFILE_KEY" ]; then
+            echo "BROWSER_WORKER_PROFILE_ENCRYPTION_KEY=$DEFAULT_PROFILE_KEY" >> "$GITHUB_ENV"
+          fi
 
       - name: Restore previous browser profile
         if: ${{ inputs.worker_mode != 'compute' && !inputs.vm_id }}
@@ -300,7 +305,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
         run: |
           export BROWSER_WORKER_PROFILE_DIR="$GITHUB_WORKSPACE/browser-worker-state/live-profile"
           mkdir -p browser-worker-state "$BROWSER_WORKER_PROFILE_DIR"
@@ -482,7 +486,6 @@ jobs:
           VM_LIFECYCLE_MODE: ${{ env.VM_LIFECYCLE_MODE }}
           PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
           PROFILE_RELEASE: vm-profile-${{ inputs.vm_id }}
-          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
         run: |
           set -euo pipefail
           mkdir -p "$PROFILE_DIR"
@@ -550,7 +553,6 @@ jobs:
           BROWSER_WORKER_PROFILE_DIR: ${{ inputs.vm_id && format('{0}/vm-profile-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-profile', github.workspace) }}
           BROWSER_WORKER_CHECKPOINT_DIR: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-checkpoint', github.workspace) }}
           BROWSER_WORKER_STATE_FILE: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}/storage-state.json', runner.temp, inputs.vm_id) || 'browser-worker-state/storage-state.json' }}
-          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
           BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
@@ -613,7 +615,7 @@ jobs:
         if: ${{ always() && steps.bootstrap.outputs.worker_mode == 'browser' && !inputs.vm_id }}
         env:
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
+
         run: |
           profile_dir="$BROWSER_WORKER_PROFILE_DIR"
           profile_ready=true
