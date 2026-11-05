@@ -109,7 +109,7 @@ jobs:
     needs: guard
     if: needs.guard.outputs.should_start == 'true'
     runs-on: ${{ inputs.size == 'large' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
-    timeout-minutes: 350
+    timeout-minutes: ${{ inputs.vm_id && fromJSON(inputs.vm_spec || '{}').lifecycle.max_lifetime_minutes && fromJSON(inputs.vm_spec || '{}').lifecycle.max_lifetime_minutes < 350 ? fromJSON(inputs.vm_spec || '{}').lifecycle.max_lifetime_minutes : 350 }}
     name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
     concurrency:
       group: utils-vm-${{ inputs.vm_id || 'legacy-browser-session' }}
@@ -146,7 +146,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ inputs.vm_id && fromJSON(inputs.vm_spec || '{}').runtime.node || '22' }}
 
       - name: Set up interactive desktop dependencies
         if: ${{ inputs.worker_mode != 'compute' }}
@@ -359,12 +359,29 @@ jobs:
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" >/dev/null 2>&1 || true
           done <<< "$artifact_ids"
 
-      - name: Install worker dependencies
+      - name: Install requested runtimes and packages
+        env:
+          VM_SPEC: ${{ inputs.vm_spec || '{}' }}
+          WORKER_MODE: ${{ inputs.worker_mode || 'browser' }}
         run: |
-          npm install --no-save ws@^8.18.0
-          if [ "${{ inputs.worker_mode || 'browser' }}" = "browser" ]; then
-            npm install --no-save @playwright/mcp@0.0.83
+          sudo apt-get update
+          sudo apt-get install -y jq curl ca-certificates
+          if [ -n "$(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]? // empty')" ]; then
+            mapfile -t apt_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]?')
+            sudo apt-get install -y -- ${apt_packages[@]}
           fi
+          python_version="$(echo "$VM_SPEC" | jq -r '.runtime.python // empty')"
+          if [ -n "$python_version" ] && [ "$python_version" != "3.12" ]; then
+            echo "::warning::GitHub runner base Python is used; requested Python $python_version is currently advisory."
+          fi
+          mapfile -t pip_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_pip[]?')
+          if [ "${#pip_packages[@]}" -gt 0 ]; then python -m pip install --user --break-system-packages "${pip_packages[@]}"; fi
+          mapfile -t npm_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_npm[]?')
+          if [ "${#npm_packages[@]}" -gt 0 ]; then npm install --global "${npm_packages[@]}"; fi
+          mapfile -t cli_tools < <(echo "$VM_SPEC" | jq -r '.runtime.cli_tools[]?')
+          if [ "${#cli_tools[@]}" -gt 0 ]; then sudo apt-get install -y -- "${cli_tools[@]}"; fi
+          npm install --no-save ws@^8.18.0
+          if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
 
       - name: Install Chromium and OS dependencies
         if: ${{ inputs.worker_mode != 'compute' }}
