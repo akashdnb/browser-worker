@@ -52,7 +52,7 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     concurrency:
-      group: browser-worker-guard-${{ github.ref }}
+      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}
       cancel-in-progress: false
     outputs:
       should_start: ${{ steps.check.outputs.should_start }}
@@ -81,13 +81,23 @@ jobs:
 
           legacy_run_ids() {
             local run_state="$1"
-            for candidate in $(gh run list --repo "$REPO" --workflow browser-worker.yml --status "$run_state" --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId"); do
+            while IFS='|' read -r candidate created_at; do
+              [ -n "$candidate" ] || continue
               job_names="$(gh run view "$candidate" --repo "$REPO" --json jobs --jq '.jobs[].name' 2>/dev/null || true)"
               if printf '%s\n' "$job_names" | grep -q '^VM '; then
                 continue
               fi
+              if [ "$run_state" = "queued" ]; then
+                created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo 0)"
+                age_seconds=$(( $(date +%s) - created_epoch ))
+                if [ "$created_epoch" -gt 0 ] && [ "$age_seconds" -gt 600 ]; then
+                  echo "::notice::Cancelling stale queued legacy Browser Worker run $candidate."
+                  gh run cancel "$candidate" --repo "$REPO" || true
+                  continue
+                fi
+              fi
               echo "$candidate"
-            done
+            done < <(gh run list --repo "$REPO" --workflow browser-worker.yml --status "$run_state" --limit 50 --json databaseId,createdAt --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | [.databaseId,.createdAt] | join(\"|\")")
           }
 
           if [ "$EVENT_NAME" = "push" ]; then
