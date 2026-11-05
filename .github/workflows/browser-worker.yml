@@ -112,7 +112,7 @@ jobs:
   browser:
     needs: guard
     if: needs.guard.outputs.should_start == 'true'
-    runs-on: ${{ inputs.size == 'large' && vars.VM_LARGE_RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.size == 'large' && vars.VM_LARGE_RUNNER_LABEL || 'ubuntu-24.04' }}
     timeout-minutes: 350
     name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
     concurrency:
@@ -153,6 +153,7 @@ jobs:
             echo "BROWSER_WORKER_STATE_FILE=$RUNNER_TEMP/vm-checkpoint-$VM_ID/storage-state.json"
             echo "BROWSER_WORKER_STATE_RELEASE_TAG=vm-profile-$VM_ID"
             echo "VM_LIFECYCLE_MODE=$(jq -r '.lifecycle.mode // "on_demand"' <<< "$vm_spec")"
+            echo "VM_BROWSER_PERSISTENT_PROFILE=$(jq -r '.browser.persistent_profile // true' <<< "$vm_spec")"
             max_lifetime="$(jq -r '.lifecycle.max_lifetime_minutes // 345' <<< "$vm_spec")"
             if [ "$max_lifetime" -gt 345 ]; then echo "::error::GitHub Actions VM maximum lifetime is 345 minutes"; exit 1; fi
             [ "$max_lifetime" -ge 1 ] || { echo "::error::VM maximum lifetime must be at least one minute"; exit 1; }
@@ -254,8 +255,11 @@ jobs:
           if [ "${#npm_packages[@]}" -gt 0 ]; then npm install --global "${npm_packages[@]}"; fi
           mapfile -t cli_tools < <(echo "$VM_SPEC" | jq -r '.runtime.cli_tools[]?')
           if [ "${#cli_tools[@]}" -gt 0 ]; then sudo apt-get install -y -- "${cli_tools[@]}"; fi
-          npm install --no-save ws@^8.18.0
-          if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
+          if [ "$WORKER_MODE" = "browser" ]; then
+            npm install --no-save ws@^8.18.0 @playwright/mcp@0.0.83
+          else
+            npm install --no-save ws@^8.18.0
+          fi
 
       - name: Install Chromium and OS dependencies
         if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
@@ -471,7 +475,7 @@ jobs:
           done <<< "$artifact_ids"
 
       - name: Restore per-VM browser profile
-        if: ${{ inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' }}
+        if: ${{ inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' && env.VM_LIFECYCLE_MODE == 'persistent' && env.VM_BROWSER_PERSISTENT_PROFILE == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           VM_ID: ${{ inputs.vm_id }}
@@ -565,7 +569,7 @@ jobs:
           if [ "$WORKER_MODE" = "browser" ]; then
             bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
             vm_pid=$!
-            if [ "$VM_LIFECYCLE_MODE" = "persistent" ] || [ -z "$VM_ID" ]; then
+            if { [ "$VM_LIFECYCLE_MODE" = "persistent" ] && [ "$VM_BROWSER_PERSISTENT_PROFILE" = "true" ]; } || [ -z "$VM_ID" ]; then
               node src/profile-checkpoint-runner.mjs &
               checkpoint_pid=$!
             else
