@@ -144,12 +144,18 @@ async function waitForPersistentProfile(timeoutMs = 15_000) {
 }
 
 async function cleanProfileLocks() {
+  const entries = await readdir(userDataDir).catch(() => []);
+  const staleAtomicWriteFiles = entries.filter((name) => name.startsWith(".org.chromium."));
   await Promise.all([
     rm(`${userDataDir}/SingletonLock`, { force: true }),
     rm(`${userDataDir}/SingletonCookie`, { force: true }),
     rm(`${userDataDir}/SingletonSocket`, { force: true }),
     rm(`${userDataDir}/DevToolsActivePort`, { force: true }),
+    ...staleAtomicWriteFiles.map((name) => rm(path.join(userDataDir, name), { force: true, recursive: true })),
   ]);
+  if (staleAtomicWriteFiles.length) {
+    console.log(`Removed ${staleAtomicWriteFiles.length} stale Chromium atomic-write files before startup`);
+  }
 }
 
 async function waitForDisplaySocket(timeoutMs = 15_000) {
