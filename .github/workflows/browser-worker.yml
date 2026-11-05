@@ -26,6 +26,11 @@ on:
         options:
           - standard
           - large
+      utils_base_url:
+        description: "Base URL of the Utils control plane for VM fleet bootstrap"
+        required: false
+        type: string
+        default: https://utils-zkiy.onrender.com
   push:
     branches:
       - main
