@@ -142,7 +142,14 @@ jobs:
             echo "BROWSER_WORKER_STATE_FILE=$RUNNER_TEMP/vm-checkpoint-$VM_ID/storage-state.json"
             echo "BROWSER_WORKER_STATE_RELEASE_TAG=vm-profile-$VM_ID"
             echo "VM_LIFECYCLE_MODE=$(jq -r '.lifecycle.mode // "on_demand"' <<< "$vm_spec")"
-            echo "VM_MAX_LIFETIME_MINUTES=$(jq -r '.lifecycle.max_lifetime_minutes // 350' <<< "$vm_spec")"
+            max_lifetime="$(jq -r '.lifecycle.max_lifetime_minutes // 345' <<< "$vm_spec")"
+            if [ "$max_lifetime" -gt 345 ]; then echo "::error::GitHub Actions VM maximum lifetime is 345 minutes"; exit 1; fi
+            [ "$max_lifetime" -ge 1 ] || { echo "::error::VM maximum lifetime must be at least one minute"; exit 1; }
+            echo "VM_MAX_LIFETIME_MINUTES=$max_lifetime" >> "$GITHUB_ENV"
+            worker_seconds=$((max_lifetime * 60 - 60))
+            [ "$worker_seconds" -ge 60 ] || worker_seconds=60
+            [ "$worker_seconds" -le 21000 ] || worker_seconds=21000
+            echo "WORKER_MAX_SECONDS=$worker_seconds" >> "$GITHUB_ENV"
             echo "VM_PYTHON_VERSION=$(jq -r '.runtime.python // "3.12"' <<< "$vm_spec")"
             echo "VM_NODE_VERSION=$(jq -r '.runtime.node // "22"' <<< "$vm_spec")"
           } >> "$GITHUB_ENV"
@@ -163,10 +170,6 @@ jobs:
               printf '%s\n' "$delimiter"
             } >> "$GITHUB_ENV"
           done < <(jq -c '.startup.environment // {} | to_entries[]' <<< "$vm_spec")
-          # Run the user-supplied setup scripts on this isolated runner.
-          while IFS= read -r script; do
-            bash -euo pipefail -c "$script"
-          done < <(jq -r '.startup.setup_scripts[]? // empty' <<< "$vm_spec")
           # Secret references are resolved by a dedicated secret bridge, not by workflow inputs.
           if [ "$(jq '(.startup.secret_refs // {}) | length' <<< "$vm_spec")" -gt 0 ]; then
             echo "::warning::VM has secret_refs; values are not injected until a supported secret resolver is configured."
@@ -418,7 +421,7 @@ jobs:
           VM_SPEC="$(cat "$VM_SPEC_PATH" 2>/dev/null || echo '{}')"
           if [ -n "$(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]? // empty')" ]; then
             mapfile -t apt_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]?')
-            sudo apt-get install -y -- ${apt_packages[@]}
+            sudo apt-get install -y -- "${apt_packages[@]}"
           fi
           python_version="$(echo "$VM_SPEC" | jq -r '.runtime.python // empty')"
           if [ -n "$python_version" ] && [ "$python_version" != "3.12" ]; then
@@ -432,6 +435,55 @@ jobs:
           if [ "${#cli_tools[@]}" -gt 0 ]; then sudo apt-get install -y -- "${cli_tools[@]}"; fi
           npm install --no-save ws@^8.18.0
           if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
+
+      - name: Run VM setup scripts
+        if: ${{ inputs.vm_id }}
+        env:
+          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
+        run: |
+          set -euo pipefail
+          while IFS= read -r script_json; do
+            script="$(jq -r . <<< "$script_json")"
+            bash -euo pipefail -c "$script"
+          done < <(jq -c '.startup.setup_scripts[]? // empty' "$VM_SPEC_PATH")
+
+      - name: Restore per-VM browser profile
+        if: ${{ inputs.vm_id && inputs.worker_mode == 'browser' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VM_ID: ${{ inputs.vm_id }}
+          VM_LIFECYCLE_MODE: ${{ steps.bootstrap.outputs.worker_mode && 'persistent' || 'on_demand' }}
+          PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
+          PROFILE_RELEASE: vm-profile-${{ inputs.vm_id }}
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
+          UTILS_BROWSER_WORKER_TOKEN: ${{ env.VM_WORKER_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROFILE_DIR"
+          if [ -z "$BROWSER_WORKER_PROFILE_ENCRYPTION_KEY" ]; then
+            echo "::error::Set BROWSER_WORKER_PROFILE_ENCRYPTION_KEY in browser-worker repository secrets to persist per-VM browser profiles."
+            exit 1
+          fi
+          if gh release view "$PROFILE_RELEASE" >/dev/null 2>&1; then
+            asset="$(gh release view "$PROFILE_RELEASE" --json assets --jq '.assets[].name | select(startswith("browser-worker-profile-") and endswith(".tar.gz.enc"))' | sort -r | head -n 1)"
+            if [ -z "$asset" ]; then
+              echo "::error::Persistent profile release exists but contains no encrypted profile archive."
+              exit 1
+            fi
+            restore_dir="$RUNNER_TEMP/profile-restore-$VM_ID"
+            mkdir -p "$restore_dir"
+            gh release download "$PROFILE_RELEASE" --pattern "$asset" --dir "$restore_dir"
+            node src/profile-archive-crypto.mjs decrypt "$restore_dir/$asset" "$restore_dir/profile.tar.gz"
+            tar -tzf "$restore_dir/profile.tar.gz" | grep -Fx "browser-worker-profile/Local State" >/dev/null
+            tar -tzf "$restore_dir/profile.tar.gz" | grep -Fx "browser-worker-profile/Default/Preferences" >/dev/null
+            rm -rf "$PROFILE_DIR"
+            mkdir -p "$restore_dir/extracted"
+            tar -xzf "$restore_dir/profile.tar.gz" -C "$restore_dir/extracted"
+            mv "$restore_dir/extracted/browser-worker-profile" "$PROFILE_DIR"
+            echo "Restored encrypted profile for VM $VM_ID"
+          else
+            echo "No prior profile exists for VM $VM_ID; starting a fresh persistent profile."
+          fi
 
       - name: Install Chromium and OS dependencies
         if: ${{ inputs.worker_mode != 'compute' }}
