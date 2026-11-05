@@ -40,8 +40,10 @@ on:
     - cron: "*/10 * * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.vm_id || 'legacy-browser-session' }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  # Let each recovery/push guard start; it explicitly cancels older legacy runs.
+  # A unique run group prevents a stuck old guard from blocking its replacement.
+  group: ${{ github.workflow }}-${{ inputs.vm_id || 'legacy-browser-session' }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -52,7 +54,7 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     concurrency:
-      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}
+      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v2
       cancel-in-progress: false
     outputs:
       should_start: ${{ steps.check.outputs.should_start }}
