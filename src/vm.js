@@ -636,9 +636,35 @@ async function waitForChildExit(child, timeoutMs) {
   });
 }
 
+async function runShutdownScripts() {
+  const specPath = process.env.VM_SPEC_PATH;
+  if (!specPath) return;
+  let scripts = [];
+  try {
+    const spec = JSON.parse(await readFile(specPath, "utf8"));
+    scripts = spec.startup?.shutdown_scripts ?? [];
+  } catch (error) {
+    console.warn("Could not load VM shutdown scripts:", error instanceof Error ? error.message : String(error));
+    return;
+  }
+  const deadline = Date.now() + 120_000;
+  for (const script of scripts) {
+    const remaining = Math.floor((deadline - Date.now()) / 1000);
+    if (remaining < 1) {
+      console.warn("VM shutdown script time budget exhausted");
+      break;
+    }
+    const result = await runCommand(script, Math.min(30, remaining));
+    if (!result.ok) {
+      console.warn("VM shutdown script failed:", result.error || result.output || result.returncode);
+    }
+  }
+}
+
 async function shutdown() {
   if (stopping) return;
   stopping = true;
+  await runShutdownScripts();
   disconnectAllVnc();
   if (relayWebSocket && relayWebSocket.readyState === WebSocket.OPEN) {
     try { relayWebSocket.close(1000, "VM lifecycle ended"); } catch {}
