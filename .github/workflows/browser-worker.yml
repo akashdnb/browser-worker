@@ -186,69 +186,6 @@ jobs:
         with:
           python-version: ${{ steps.bootstrap.outputs.python_version || '3.12' }}
 
-      - name: Install requested runtimes and packages
-        env:
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq curl ca-certificates
-          VM_SPEC="$(cat "$VM_SPEC_PATH" 2>/dev/null || echo '{}')"
-          if [ -n "$(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]? // empty')" ]; then
-            mapfile -t apt_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]?')
-            sudo apt-get install -y -- "${apt_packages[@]}"
-          fi
-          python_version="$(echo "$VM_SPEC" | jq -r '.runtime.python // empty')"
-          if [ -n "$python_version" ] && [ "$python_version" != "3.12" ]; then
-            echo "::warning::GitHub runner base Python is used; requested Python $python_version is currently advisory."
-          fi
-          mapfile -t pip_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_pip[]?')
-          if [ "${#pip_packages[@]}" -gt 0 ]; then python -m pip install --user --break-system-packages "${pip_packages[@]}"; fi
-          mapfile -t npm_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_npm[]?')
-          if [ "${#npm_packages[@]}" -gt 0 ]; then npm install --global "${npm_packages[@]}"; fi
-          mapfile -t cli_tools < <(echo "$VM_SPEC" | jq -r '.runtime.cli_tools[]?')
-          if [ "${#cli_tools[@]}" -gt 0 ]; then sudo apt-get install -y -- "${cli_tools[@]}"; fi
-          npm install --no-save ws@^8.18.0
-          if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
-
-      - name: Install Chromium and OS dependencies
-        if: ${{ inputs.worker_mode != 'compute' }}
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Chromium and OS dependencies
-        if: ${{ (steps.bootstrap.outputs.worker_mode || 'browser') == 'browser' }}
-        run: npx playwright install --with-deps chromium
-
-      - name: Resolve Chromium executable
-        if: ${{ (steps.bootstrap.outputs.worker_mode || 'browser') == 'browser' }}
-        run: |
-          chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
-          test -n "$chromium_bin"
-          echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
-          echo "Using shared interactive Chromium at $chromium_bin"
-
-      - name: Run VM setup scripts
-        if: ${{ inputs.vm_id }}
-        env:
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-        run: |
-          set -euo pipefail
-          while IFS= read -r script_json; do
-            script="$(jq -r . <<< "$script_json")"
-            bash -euo pipefail -c "$script"
-          done < <(jq -c '.startup.setup_scripts[]? // empty' "$VM_SPEC_PATH")
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ steps.bootstrap.outputs.node_version || '22' }}
-
-      - name: Set up Python
-        if: ${{ inputs.vm_id }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.bootstrap.outputs.python_version || '3.12' }}
-
       - name: Validate requested VM resources
         if: ${{ inputs.vm_id }}
         env:
@@ -294,6 +231,10 @@ jobs:
           if [ "${#cli_tools[@]}" -gt 0 ]; then sudo apt-get install -y -- "${cli_tools[@]}"; fi
           npm install --no-save ws@^8.18.0
           if [ "$WORKER_MODE" = "browser" ]; then npm install --no-save @playwright/mcp@0.0.83; fi
+
+      - name: Install Chromium and OS dependencies
+        if: ${{ (steps.bootstrap.outputs.worker_mode || 'browser') == 'browser' }}
+        run: npx playwright install --with-deps chromium
 
       - name: Run VM setup scripts
         if: ${{ inputs.vm_id }}
