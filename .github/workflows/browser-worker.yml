@@ -165,6 +165,7 @@ jobs:
             echo "UTILS_BROWSER_WORKER_TOKEN=$worker_token"
             echo "UTILS_BROWSER_WORKER_URL=$browser_url"
             echo "UTILS_VM_FLEET_URL=$vm_url"
+            echo "VM_WORKER_SOCKET_PATH=/vm-fleet-worker"
             echo "WORKER_MODE=$worker_mode"
             echo "BROWSER_WORKER_PROFILE_DIR=$RUNNER_TEMP/vm-profile-$VM_ID"
             echo "PLAYWRIGHT_MCP_USER_DATA_DIR=$RUNNER_TEMP/vm-profile-$VM_ID"
@@ -319,6 +320,7 @@ jobs:
             echo "WORKER_MODE=browser"
             echo "UTILS_BROWSER_WORKER_TOKEN=$DEFAULT_WORKER_TOKEN"
             echo "UTILS_BROWSER_WORKER_URL=https://utils-zkiy.onrender.com/browser-worker"
+            echo "VM_WORKER_SOCKET_PATH=/vm-worker"
           } >> "$GITHUB_ENV"
           if [ -n "$DEFAULT_PROFILE_KEY" ]; then
             echo "BROWSER_WORKER_PROFILE_ENCRYPTION_KEY=$DEFAULT_PROFILE_KEY" >> "$GITHUB_ENV"
@@ -600,6 +602,8 @@ jobs:
           echo "Connecting interactive VM to ${UTILS_BROWSER_WORKER_URL%/browser-worker}"
 
           if [ "$WORKER_MODE" = "browser" ]; then
+            : > "$RUNNER_TEMP/interactive-vm.log"
+            echo "Starting VM supervisor with relay path $VM_WORKER_SOCKET_PATH"
             bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
             vm_pid=$!
             if [ -z "$VM_ID" ]; then
