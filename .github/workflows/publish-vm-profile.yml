@@ -36,7 +36,7 @@ jobs:
           set -euo pipefail
           vm_id="${RUN_TITLE#VM }"
           [[ "$vm_id" =~ ^vm-[A-Za-z0-9._-]{1,60}$ ]] || { echo "::error::Unexpected VM run title"; exit 1; }
-          archive="$(find artifacts -type f -name 'browser-worker-profile.tar.gz.enc' -print -quit)"
+          archive="$(find artifacts -type f -name 'browser-worker-profile.tar.gz.enc' -print -quit 2>/dev/null || true)"
           if [ -z "$archive" ]; then
             echo "No browser profile artifact was produced by this VM run."
             exit 0
