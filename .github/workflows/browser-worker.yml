@@ -294,9 +294,11 @@ jobs:
 
       - name: Set up interactive desktop dependencies
         if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
+        env:
+          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc openbox xdotool
+          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get update
+          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y xvfb x11vnc openbox xdotool
 
       - name: Configure legacy worker environment
         if: ${{ !inputs.vm_id }}
