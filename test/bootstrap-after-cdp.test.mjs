@@ -11,7 +11,7 @@ test("VM relay authenticates before optional BrowserMCP extension bootstrap", as
 
   assert.doesNotMatch(hook, /run_bootstrap\(\)/);
   assert.doesNotMatch(desktop, /BROWSER_MCP_BOOTSTRAP_RUNNER/);
-  assert.match(desktop, /if \(!\(await probeCdp\(30_000\)\)\)/);
+  assert.match(desktop, /if \(!\(await probeCdp\(cdpStartupTimeoutMs, chromiumProcess\)\)\)/);
   assert.ok(authOk >= 0);
   assert.ok(bootstrapCall > authOk);
   assert.match(vm, /keeping Chromium\/CDP and the VM relay alive/);
