@@ -135,8 +135,8 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
-          oidc="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=utils-vm-bootstrap" | jq -er .value)"
-          response="$(curl -fsS -X POST "$BOOTSTRAP_URL" -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" --data "$(jq -nc --arg vm_id "$VM_ID" '{vm_id:$vm_id}')")"
+          oidc="$(curl -fsS --retry 5 --retry-delay 2 --retry-max-time 30 --retry-connrefused -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=utils-vm-bootstrap" | jq -er .value)"
+          response="$(curl -fsS --retry 8 --retry-delay 2 --retry-max-time 90 --retry-connrefused -X POST "$BOOTSTRAP_URL" -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" --data "$(jq -nc --arg vm_id "$VM_ID" '{vm_id:$vm_id}')")"
           worker_token="$(jq -er .worker_token <<< "$response")"
           vm_spec="$(jq -ec .spec <<< "$response")"
           worker_mode="$(jq -er .worker_mode <<< "$response")"
