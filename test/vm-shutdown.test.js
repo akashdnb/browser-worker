@@ -25,3 +25,23 @@ test("VM profile checkpoint uses a stable workspace profile path", async () => {
   assert.match(workflow, /PLAYWRIGHT_MCP_USER_DATA_DIR: .*github\.workspace.*browser-worker-state\/live-profile/);
   assert.match(workflow, /BROWSER_WORKER_CHECKPOINT_SECONDS: "60"/);
 });
+
+
+test("managed VM workers never receive a GitHub repository write token", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/worker.js", import.meta.url), "utf8");
+  const publisher = await readFile(new URL("../.github/workflows/publish-vm-profile.yml", import.meta.url), "utf8");
+
+  assert.match(workflow, /GITHUB_TOKEN: \$\{\{ !inputs\.vm_id && github\.token \|\| '' \}\}/);
+  assert.match(workflow, /GH_TOKEN: \$\{\{ !inputs\.vm_id && github\.token \|\| '' \}\}/);
+  assert.match(worker, /if \(!process\.env\.VM_ID && \(!githubToken \|\| !githubRepository \|\| !githubRunId\)\)/);
+  assert.match(publisher, /workflow_run:/);
+  assert.match(publisher, /contents: write/);
+});
+
+test("fleet profile encryption key is obtained through the OIDC bootstrap response", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  assert.match(workflow, /browser_profile_encryption_key/);
+  assert.match(workflow, /BROWSER_WORKER_PROFILE_ENCRYPTION_KEY=\$profile_key/);
+  assert.match(workflow, /vm-profile-\$\{\{ inputs\.vm_id \}\}/);
+});
