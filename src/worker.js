@@ -25,14 +25,14 @@ if (!Number.isFinite(maxSeconds) || maxSeconds < 60 || maxSeconds > 21000) {
 if (!Number.isFinite(renewalLeadSeconds) || renewalLeadSeconds < 60 || renewalLeadSeconds >= maxSeconds) {
   throw new Error("WORKER_RENEWAL_LEAD_SECONDS must be at least 60 and less than WORKER_MAX_SECONDS");
 }
-if (!githubToken || !githubRepository || !githubRunId) {
-  throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_RUN_ID are required for worker self-renewal");
+if (!process.env.VM_ID && (!githubToken || !githubRepository || !githubRunId)) {
+  throw new Error("GITHUB_TOKEN, GITHUB_REPOSITORY, and GITHUB_RUN_ID are required for legacy worker self-renewal");
 }
 if (!Number.isFinite(cdpTimeoutMs) || cdpTimeoutMs < 1000) {
   throw new Error("PLAYWRIGHT_MCP_CDP_TIMEOUT must be at least 1000ms");
 }
 
-const workerId = randomUUID();
+const workerId = process.env.VM_ID || process.env.VM_WORKER_ID || randomUUID();
 let shuttingDown = false;
 let reconnectTimer;
 let renewalTimer;
@@ -417,7 +417,7 @@ await waitForCdp();
 await waitForMcp();
 await ensureUpstreamInitialized();
 connectGateway();
-scheduleReplacement();
+if (!process.env.VM_ID) scheduleReplacement();
 console.log(`Worker ${workerId} started; lifetime ${maxSeconds}s; shared browser=${cdpEndpoint}`);
 setTimeout(() => {
   console.log("Worker lifecycle limit reached; stopping for scheduled replacement");

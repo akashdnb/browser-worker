@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
@@ -14,6 +15,12 @@ const vncPort = Number.parseInt(process.env.VM_VNC_PORT ?? "5900", 10);
 const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10);
 const chromium = process.env.CHROMIUM_BIN;
 const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
+const workerMode = process.env.WORKER_MODE ?? "browser";
+const workerSocketPath = process.env.VM_ID ? "/vm-fleet-worker" : "/vm-worker";
+const vmLifetimeMinutes = Number.parseInt(process.env.VM_MAX_LIFETIME_MINUTES ?? "345", 10);
+if (!Number.isInteger(vmLifetimeMinutes) || vmLifetimeMinutes < 1 || vmLifetimeMinutes > 350) {
+  throw new Error("VM_MAX_LIFETIME_MINUTES must be between 1 and 350");
+}
 // Keep Chromium startup, the Playwright client, and the watchdog on one timeout.
 // A restored profile plus extension initialization can legitimately take longer
 // than the old 30-second hard-coded probe.
@@ -26,11 +33,12 @@ if (!Number.isFinite(cdpStartupTimeoutMs) || cdpStartupTimeoutMs < 30_000 || cdp
 }
 
 if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
-if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
+if (workerMode === "browser" && !chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
 
 const processes = [];
 const vncSockets = new Map();
 let stopping = false;
+let relayWebSocket = null;
 
 function start(command, env = process.env, { critical = false } = {}) {
   const child = spawn(command[0], command.slice(1), { env, stdio: ["ignore", "inherit", "inherit"] });
@@ -188,6 +196,7 @@ async function killStaleChromium() {
 }
 
 async function startDesktop() {
+  if (workerMode === "compute") return;
   const env = { ...process.env, DISPLAY: display };
 
   // vm-supervisor may have terminated the wrapper process while its real
@@ -251,7 +260,7 @@ async function startDesktop() {
 }
 function clampTimeoutSeconds(value) {
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? Math.min(300, Math.max(1, parsed)) : 60;
+  return Number.isFinite(parsed) ? Math.min(86_400, Math.max(1, parsed)) : 60;
 }
 
 function shellQuote(value) {
@@ -308,15 +317,16 @@ async function handleCommand(payload) {
       userDataDir,
       cdpPort,
       cwd: process.cwd(),
-      capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
+      capabilities: workerMode === "compute" ? ["terminal", "files", "processes", "packages"] : ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
     };
   }
   if (action === "restore_browser") {
+    if (workerMode === "compute") throw new Error("Browser is disabled for this compute-only VM");
     return await runCommand("windows=$(xdotool search --class chromium 2>/dev/null || true); test -n \"$windows\" || { echo 'Chromium window not found' >&2; exit 1; }; for window in $windows; do xdotool windowmap $window 2>/dev/null || true; xdotool windowactivate --sync $window 2>/dev/null || true; xdotool windowraise $window 2>/dev/null || true; xdotool windowsize $window 1440 900 2>/dev/null || true; done", 10);
   }
   if (action === "exec") {
     const command = payload?.command;
-    if (typeof command !== "string" || !command.trim() || command.length > 4000) throw new Error("command must be a non-empty string of at most 4000 characters");
+    if (typeof command !== "string" || !command.trim() || command.length > 20000) throw new Error("command must be a non-empty string of at most 20000 characters");
     return await runCommand(command, payload?.timeout_seconds);
   }
   if (action === "read_file") {
@@ -376,6 +386,7 @@ async function handleCommand(payload) {
     }
   }
   if (action === "screenshot") {
+    if (workerMode === "compute") throw new Error("Desktop is disabled for this compute-only VM");
     const path = "/tmp/interactive-vm-screen.png";
     const result = await runCommand(`scrot -o ${shellQuote(path)}`, 15);
     if (!result.ok) return result;
@@ -391,6 +402,7 @@ async function handleCommand(payload) {
     throw new Error("manager must be apt or npm");
   }
   if (action === "open_url") {
+    if (workerMode === "compute") throw new Error("Browser is disabled for this compute-only VM");
     const url = payload?.url;
     if (typeof url !== "string" || !/^https?:\/\//.test(url)) throw new Error("Only HTTP(S) URLs are allowed");
     start([chromium, "--new-tab", url], { ...process.env, DISPLAY: display });
@@ -437,6 +449,7 @@ async function connectRelay(uri) {
       maxPayload: 16 * 1024 * 1024,
       handshakeTimeout: 15_000,
     });
+    relayWebSocket = websocket;
     let heartbeat;
     let authTimer;
     let connected = false;
@@ -450,7 +463,8 @@ async function connectRelay(uri) {
         type: "vm.hello",
         token,
         workerId,
-        capabilities: ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
+        vm_id: workerId,
+        capabilities: workerMode === "compute" ? ["terminal", "files", "processes", "packages"] : ["desktop", "browser", "terminal", "files", "processes", "screenshot", "packages"],
       }));
       // A successful TCP/WebSocket upgrade is not proof that the gateway
       // accepted this worker. Wait for the explicit auth acknowledgement
@@ -471,8 +485,10 @@ async function connectRelay(uri) {
         authenticated = true;
         connected = true;
         console.log(`Interactive VM authenticated and connected to utils as ${workerId}`);
-        console.log(`Shared Chromium is ready on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
-        void bootstrapBrowserMcpAfterCdp();
+        if (workerMode === "browser") {
+          console.log(`Shared Chromium is ready on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
+          void bootstrapBrowserMcpAfterCdp();
+        }
         heartbeat = setInterval(() => {
           if (websocket.readyState === WebSocket.OPEN) {
             websocket.send(JSON.stringify({ type: "vm.heartbeat", workerId, ts: Date.now() }));
@@ -509,6 +525,54 @@ async function connectRelay(uri) {
         disconnectVnc(String(message.clientId ?? ""));
         return;
       }
+      if (message.type === "vm.shutdown") {
+        void shutdown();
+        return;
+      }
+      if (message.type === "vm.task.execute") {
+        try {
+          const result = await handleCommand({ action: "exec", command: message.command, timeout_seconds: message.timeout_seconds });
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({
+              type: "vm.task.result",
+              request_id: message.request_id,
+              result: { returncode: result.returncode ?? (result.ok ? 0 : 1), stdout: result.stdout ?? result.output ?? "", stderr: result.stderr ?? result.error ?? "" },
+            }));
+          }
+        } catch (error) {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(JSON.stringify({ type: "vm.task.error", request_id: message.request_id, error: error instanceof Error ? error.message : String(error) }));
+          }
+        }
+        return;
+      }
+      if (message.type === "vm.file.write") {
+        try {
+          const data = Buffer.from(String(message.content_base64 || ""), "base64");
+          if (data.length > 1_048_576) throw new Error("file payload exceeds 1 MB");
+          await mkdir(path.dirname(message.path), { recursive: true });
+          await writeFile(message.path, data, { mode: 0o600 });
+          websocket.send(JSON.stringify({ type: "vm.file.result", request_id: message.request_id, bytes_written: data.length }));
+        } catch (error) {
+          websocket.send(JSON.stringify({ type: "vm.file.error", request_id: message.request_id, error: error instanceof Error ? error.message : String(error) }));
+        }
+        return;
+      }
+      if (message.type === "vm.file.read") {
+        try {
+          const data = await readFile(message.path);
+          if (data.length > 1_048_576) throw new Error("file payload exceeds 1 MB");
+          websocket.send(JSON.stringify({ type: "vm.file.result", request_id: message.request_id, content_base64: data.toString("base64"), bytes_read: data.length }));
+        } catch (error) {
+          websocket.send(JSON.stringify({ type: "vm.file.error", request_id: message.request_id, error: error instanceof Error ? error.message : String(error) }));
+        }
+        return;
+      }
+      if (message.type === "vm.shutdown") {
+        void shutdown();
+        websocket.close(1000, "VM shutdown requested");
+        return;
+      }
       if (message.type === "vm.command") {
         try {
           const result = await handleCommand(message.payload ?? {});
@@ -539,10 +603,12 @@ async function connectRelay(uri) {
 }
 
 async function main() {
-  await startDesktop();
-  await waitForPort("127.0.0.1", vncPort);
+  if (workerMode === "browser") {
+    await startDesktop();
+    await waitForPort("127.0.0.1", vncPort);
+  }
 
-  const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}/vm-worker`;
+  const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}${workerSocketPath}`;
   let backoffMs = 2_000;
 
   while (!stopping) {
@@ -570,10 +636,39 @@ async function waitForChildExit(child, timeoutMs) {
   });
 }
 
+async function runShutdownScripts() {
+  const specPath = process.env.VM_SPEC_PATH;
+  if (!specPath) return;
+  let scripts = [];
+  try {
+    const spec = JSON.parse(await readFile(specPath, "utf8"));
+    scripts = spec.startup?.shutdown_scripts ?? [];
+  } catch (error) {
+    console.warn("Could not load VM shutdown scripts:", error instanceof Error ? error.message : String(error));
+    return;
+  }
+  const deadline = Date.now() + 120_000;
+  for (const script of scripts) {
+    const remaining = Math.floor((deadline - Date.now()) / 1000);
+    if (remaining < 1) {
+      console.warn("VM shutdown script time budget exhausted");
+      break;
+    }
+    const result = await runCommand(script, Math.min(30, remaining));
+    if (!result.ok) {
+      console.warn("VM shutdown script failed:", result.error || result.output || result.returncode);
+    }
+  }
+}
+
 async function shutdown() {
   if (stopping) return;
   stopping = true;
+  await runShutdownScripts();
   disconnectAllVnc();
+  if (relayWebSocket && relayWebSocket.readyState === WebSocket.OPEN) {
+    try { relayWebSocket.close(1000, "VM lifecycle ended"); } catch {}
+  }
 
   // Ask Chromium to exit first and give it time to flush its session/tab files.
   // Killing its parent VM relay must not race Chromium's clean profile shutdown.
@@ -604,5 +699,11 @@ async function shutdown() {
 process.on("SIGTERM", () => void shutdown());
 process.on("SIGINT", () => void shutdown());
 
+const lifetimeTimer = setTimeout(() => {
+  console.log(`VM lifetime limit reached after ${vmLifetimeMinutes} minutes; closing the runner worker.`);
+  void shutdown();
+}, vmLifetimeMinutes * 60_000);
+lifetimeTimer.unref();
 await main();
+clearTimeout(lifetimeTimer);
 await shutdown();
