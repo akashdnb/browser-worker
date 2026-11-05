@@ -15,7 +15,7 @@ test("legacy recovery guard skips cleanly when a worker is already active", asyn
 
 test("fleet VM guards do not serialize behind the legacy worker guard", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /group: browser-worker-guard-\$\{\{ github\.ref \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy' \}\}-v4/);
+  assert.match(workflow, /group: browser-worker-guard-\$\{\{ github\.ref \}\}-\$\{\{ inputs\.vm_id \|\| 'legacy' \}\}-v5/);
 });
 
 test("stale queued legacy runs do not block recovery", async () => {
@@ -27,7 +27,7 @@ test("stale queued legacy runs do not block recovery", async () => {
 
 test("legacy guard identifies fleet runs from run names without per-run API calls", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /\[\.databaseId,\.createdAt,\.displayTitle\]/);
+  assert.match(workflow, /\[\.id,\.created_at,\.display_title\]/);
   assert.match(workflow, /"VM "\*\) continue/);
   assert.doesNotMatch(workflow, /gh run view "\$candidate"/);
 });
@@ -43,4 +43,11 @@ test("push handoff cancels active legacy runs without waiting on gh run cancel",
   assert.match(workflow, /gh api --method POST "repos\/\$REPO\/actions\/runs\/\$stale_run_id\/cancel"/);
   assert.doesNotMatch(workflow, /gh run cancel "\$stale_run_id"/);
   assert.match(workflow, /timeout-minutes: 2/);
+});
+
+test("legacy guard uses the GitHub REST run title and path fields", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  assert.match(workflow, /gh api "repos\/\$REPO\/actions\/runs\?status=\$run_state&per_page=100"/);
+  assert.match(workflow, /\.path == "\.github\/workflows\/browser-worker\.yml"/);
+  assert.match(workflow, /\.display_title/);
 });

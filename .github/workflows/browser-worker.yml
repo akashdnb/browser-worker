@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     concurrency:
-      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v4
+      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v5
       cancel-in-progress: false
     outputs:
       should_start: ${{ steps.check.outputs.should_start }}
@@ -98,7 +98,7 @@ jobs:
                 fi
               fi
               echo "$candidate"
-            done < <(gh run list --repo "$REPO" --workflow browser-worker.yml --status "$run_state" --limit 50 --json databaseId,createdAt,displayTitle --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | [.databaseId,.createdAt,.displayTitle] | join(\"|\")")
+            done < <(gh api "repos/$REPO/actions/runs?status=$run_state&per_page=100" | jq -r --argjson current "$CURRENT_RUN_ID" '.workflow_runs[] | select(.id != $current) | select(.path == ".github/workflows/browser-worker.yml") | [.id,.created_at,.display_title] | join("|")')
           }
 
           if [ "$EVENT_NAME" = "push" ]; then
