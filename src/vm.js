@@ -9,7 +9,7 @@ import { monitorProcessExit } from "./process-monitor.js";
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, "");
 const utilsBaseUrl = gatewayUrl?.replace(/\/browser-worker\/?$/, "");
 const token = process.env.UTILS_BROWSER_WORKER_TOKEN;
-const workerId = process.env.VM_WORKER_ID ?? `github-${process.env.GITHUB_RUN_ID ?? process.pid}`;
+const workerId = process.env.VM_ID || process.env.VM_WORKER_ID || `github-${process.env.GITHUB_RUN_ID ?? process.pid}`;
 const display = process.env.DISPLAY ?? ":99";
 const vncPort = Number.parseInt(process.env.VM_VNC_PORT ?? "5900", 10);
 const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10);
