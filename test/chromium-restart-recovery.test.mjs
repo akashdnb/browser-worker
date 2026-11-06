@@ -31,6 +31,6 @@ test("VM starts X11 only after its socket is ready and starts VNC after CDP", as
   const vm = await readFile(new URL("../src/vm.js", import.meta.url), "utf8");
   const start = vm.slice(vm.indexOf("async function startDesktop()"), vm.indexOf("function clampTimeoutSeconds"));
 
-  assert.match(start, /await waitForDisplaySocket\(\);\s*start\(\["openbox"\]/);
+  assert.match(start, /await waitForDisplaySocket\(\);\s*(?:await reportStartup\([^;]+\);\s*)?start\(\["openbox"\]/);
   assert.ok(start.indexOf("await probeCdp(cdpStartupTimeoutMs, chromiumProcess)") < start.indexOf('start([\n    "x11vnc"'));
 });
