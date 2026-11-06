@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
-      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v6
+      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v7
       cancel-in-progress: false
     outputs:
       should_start: ${{ steps.check.outputs.should_start }}
@@ -117,7 +117,7 @@ jobs:
                 created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo 0)"
                 age_seconds=$(( $(date +%s) - created_epoch ))
                 if [ "$created_epoch" -gt 0 ] && [ "$age_seconds" -gt 600 ]; then
-                  echo "::notice::Ignoring stale queued legacy Browser Worker run $candidate so it cannot block recovery."
+                  echo "::notice::Ignoring stale queued legacy Browser Worker run $candidate so it cannot block recovery." >&2
                   continue
                 fi
               fi
