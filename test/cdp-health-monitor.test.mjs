@@ -144,4 +144,6 @@ test("worker runtime gates MCP requests and reports CDP readiness over the exist
   assert.match(worker, /if \(!upstreamReady\)/);
   assert.match(worker, /cdpMonitor\.forceRecovery\(/);
   assert.match(worker, /gatewayReconnectAttempt/);
+  assert.match(worker, /ensureUpstreamInitialized\(\{ deadline \}\)/);
+  assert.match(worker, /AbortSignal\.timeout\(timeoutMs\)/);
 });
