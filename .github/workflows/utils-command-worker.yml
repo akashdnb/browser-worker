@@ -59,41 +59,6 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Provision environment profiles and custom tools
-        env:
-          PROFILES_JSON: ${{ inputs.profiles }}
-          CUSTOM_SETUP_JSON: ${{ inputs.custom_setup }}
-        run: |
-          python - <<'PY'
-          import json, os, subprocess
-          profiles = json.loads(os.environ["PROFILES_JSON"])
-          setup = json.loads(os.environ["CUSTOM_SETUP_JSON"])
-          allowed_profiles = {"minimal", "python", "node", "playwright-chromium", "devops"}
-          allowed_setup = {"apt_packages", "pip_packages", "npm_packages", "commands"}
-          if (not isinstance(profiles, list) or not profiles
-                  or any(profile not in allowed_profiles for profile in profiles)
-                  or not isinstance(setup, dict) or set(setup) - allowed_setup):
-              raise SystemExit("Invalid environment configuration")
-          apt = list(setup.get("apt_packages", []))
-          if "devops" in profiles:
-              apt += ["jq", "yq", "ripgrep", "shellcheck"]
-          if apt:
-              subprocess.run(["sudo", "apt-get", "update"], check=True, timeout=300)
-              subprocess.run(["sudo", "apt-get", "install", "-y", "--no-install-recommends", *dict.fromkeys(apt)], check=True, timeout=600)
-          pip = list(setup.get("pip_packages", []))
-          if "playwright-chromium" in profiles:
-              pip += ["playwright"]
-          if pip:
-              subprocess.run(["python", "-m", "pip", "install", "--disable-pip-version-check", *dict.fromkeys(pip)], check=True, timeout=600)
-          if "playwright-chromium" in profiles:
-              subprocess.run(["python", "-m", "playwright", "install", "--with-deps", "chromium"], check=True, timeout=900)
-          npm = list(setup.get("npm_packages", []))
-          if npm:
-              subprocess.run(["npm", "install", "--global", *dict.fromkeys(npm)], check=True, timeout=600)
-          for command in setup.get("commands", []):
-              subprocess.run(command, shell=True, check=True, timeout=600)
-          PY
-
       - name: Start command worker agent
         env:
           UTILS_WORKER_ID: ${{ inputs.worker_id }}
@@ -101,6 +66,8 @@ jobs:
           UTILS_WORKER_SERVER_URL: ${{ inputs.server_url }}
           UTILS_WORKER_LIFETIME_HOURS: ${{ inputs.lifetime_hours }}
           UTILS_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          UTILS_WORKER_PROFILES: ${{ inputs.profiles }}
+          UTILS_WORKER_CUSTOM_SETUP: ${{ inputs.custom_setup }}
         run: |
           test -n "$UTILS_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
           python -m pip install --disable-pip-version-check "websockets>=14.2,<16"
