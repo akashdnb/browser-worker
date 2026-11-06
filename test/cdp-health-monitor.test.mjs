@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 import { CdpHealthMonitor } from "../src/cdp-health-monitor.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -132,4 +133,14 @@ test("uses capped exponential backoff when the browser backend misses its startu
   await monitor.forceRecovery("Chromium CDP unavailable");
   assert.deepEqual(delays, [5, 10, 20]);
   assert.equal(monitor.isReady, false);
+});
+
+test("worker runtime gates MCP requests and reports CDP readiness over the existing gateway socket", async () => {
+  const worker = await readFile(new URL("../src/worker.js", import.meta.url), "utf8");
+  assert.match(worker, /new CdpHealthMonitor\(/);
+  assert.match(worker, /type: "worker\.not_ready"/);
+  assert.match(worker, /type: "worker\.ready"/);
+  assert.match(worker, /if \(!upstreamReady\)/);
+  assert.match(worker, /cdpMonitor\.forceRecovery\(/);
+  assert.match(worker, /gatewayReconnectAttempt/);
 });
