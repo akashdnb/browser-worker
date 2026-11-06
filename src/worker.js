@@ -163,7 +163,7 @@ async function waitForTcpEndpoint(endpoint, label, timeoutMs) {
   const port = Number.parseInt(url.port || (url.protocol === "https:" ? "443" : "80"), 10);
   const deadline = Date.now() + timeoutMs;
 
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !shuttingDown) {
     try {
       const addresses = await dns.lookup(host, { all: true });
       for (const { address, family } of addresses) {
@@ -196,6 +196,7 @@ async function waitForTcpEndpoint(endpoint, label, timeoutMs) {
     }
     await new Promise((resolve) => setTimeout(resolve, 750));
   }
+  if (shuttingDown) throw new Error("Worker is shutting down");
   throw new Error(`Timed out waiting for ${label} at ${host}:${port}`);
 }
 
@@ -206,7 +207,7 @@ async function waitForMcp(timeoutMs = 90_000) {
 async function waitForCdp(timeoutMs = cdpTimeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "unknown error";
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !shuttingDown) {
     try {
       const response = await fetch(`${cdpEndpoint.replace(/\/$/, "")}/json/version`, {
         signal: AbortSignal.timeout(1500),
@@ -222,6 +223,7 @@ async function waitForCdp(timeoutMs = cdpTimeoutMs) {
     }
     await new Promise((resolve) => setTimeout(resolve, 750));
   }
+  if (shuttingDown) throw new Error("Worker is shutting down");
   throw new Error(`Timed out waiting for shared Chromium CDP at ${cdpEndpoint}: ${lastError}`);
 }
 
