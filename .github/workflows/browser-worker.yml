@@ -754,7 +754,8 @@ jobs:
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
-          PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
+          VM_CHROMIUM_STARTUP_TIMEOUT_MS: "300000"
+          PLAYWRIGHT_MCP_CDP_TIMEOUT: "300000"
           GITHUB_TOKEN: ${{ !inputs.vm_id && github.token || '' }}
           GH_TOKEN: ${{ !inputs.vm_id && github.token || '' }}
           VM_CHROMIUM_DEBUG_PORT: "9222"

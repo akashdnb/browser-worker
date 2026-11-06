@@ -26,4 +26,6 @@ test("browser worker workflow verifies CDP before starting the VM", async () => 
   assert.match(smokeTest, /\/json\/version/);
   assert.match(smokeTest, /Chromium CDP smoke test passed/);
   assert.match(smokeTest, /Playwright Chromium failed to open its DevTools endpoint/);
+  assert.match(workflow, /VM_CHROMIUM_STARTUP_TIMEOUT_MS: "300000"/);
+  assert.match(workflow, /PLAYWRIGHT_MCP_CDP_TIMEOUT: "300000"/);
 });
