@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import WebSocket from "ws";
 import { getCdpResponse } from "./cdp-http.mjs";
 import { monitorProcessExit } from "./process-monitor.js";
+import { desktopProcessEnvironment, removeChromiumAtomicWriteFiles } from "./chromium-profile-cleanup.mjs";
 
 const gatewayUrl = process.env.UTILS_BROWSER_WORKER_URL?.replace(/\/$/, "");
 const utilsBaseUrl = gatewayUrl?.replace(/\/browser-worker\/?$/, "");
@@ -144,17 +145,15 @@ async function waitForPersistentProfile(timeoutMs = 15_000) {
 }
 
 async function cleanProfileLocks() {
-  const entries = await readdir(userDataDir).catch(() => []);
-  const staleAtomicWriteFiles = entries.filter((name) => name.startsWith(".org.chromium."));
+  const removedAtomicWriteFiles = await removeChromiumAtomicWriteFiles(userDataDir);
   await Promise.all([
     rm(`${userDataDir}/SingletonLock`, { force: true }),
     rm(`${userDataDir}/SingletonCookie`, { force: true }),
     rm(`${userDataDir}/SingletonSocket`, { force: true }),
     rm(`${userDataDir}/DevToolsActivePort`, { force: true }),
-    ...staleAtomicWriteFiles.map((name) => rm(path.join(userDataDir, name), { force: true, recursive: true })),
   ]);
-  if (staleAtomicWriteFiles.length) {
-    console.log(`Removed ${staleAtomicWriteFiles.length} stale Chromium atomic-write files before startup`);
+  if (removedAtomicWriteFiles) {
+    console.log(`Removed ${removedAtomicWriteFiles} stale Chromium atomic-write files recursively before startup`);
   }
 }
 
@@ -203,7 +202,7 @@ async function killStaleChromium() {
 
 async function startDesktop() {
   if (workerMode === "compute") return;
-  const env = { ...process.env, DISPLAY: display };
+  const env = desktopProcessEnvironment(process.env, display);
 
   // vm-supervisor may have terminated the wrapper process while its real
   // "chrome" child survived. Never reuse that orphan: it can hold the profile

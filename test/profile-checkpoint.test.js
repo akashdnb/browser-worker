@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createProfileCheckpoint, profileIsReady } from "../src/profile-checkpoint.mjs";
+import { desktopProcessEnvironment, removeChromiumAtomicWriteFiles } from "../src/chromium-profile-cleanup.mjs";
 
 async function makeProfile(root) {
   const profile = path.join(root, "profile");
@@ -17,8 +18,39 @@ async function makeProfile(root) {
   await writeFile(path.join(profile, "Default", "Cache", "disposable"), "cache");
   await writeFile(path.join(profile, "SingletonLock"), "lock");
   await writeFile(path.join(profile, ".org.chromium.Chromium.Local State.tmp"), "stale atomic write");
+  await writeFile(path.join(profile, "Default", ".org.chromium.Chromium.Network Persistent State.tmp"), "nested stale write");
+  await writeFile(path.join(profile, "Default", "Sessions", ".org.chromium.Chromium.Session.tmp"), "deep stale write");
   return profile;
 }
+
+test("Chromium atomic-write files are removed recursively without deleting profile data", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "chromium-profile-cleanup-"));
+  try {
+    const profile = path.join(root, "profile");
+    await mkdir(path.join(profile, "Default", "Sessions"), { recursive: true });
+    await writeFile(path.join(profile, "Default", ".org.chromium.Chromium.Network.tmp"), "stale");
+    await writeFile(path.join(profile, "Default", "Sessions", ".org.chromium.Chromium.Session.tmp"), "stale");
+    await writeFile(path.join(profile, "Default", "Sessions", "Tabs_1"), "keep");
+    assert.equal(await removeChromiumAtomicWriteFiles(profile), 2);
+    await assert.rejects(stat(path.join(profile, "Default", ".org.chromium.Chromium.Network.tmp")));
+    await assert.rejects(stat(path.join(profile, "Default", "Sessions", ".org.chromium.Chromium.Session.tmp")));
+    assert.equal(await readFile(path.join(profile, "Default", "Sessions", "Tabs_1"), "utf8"), "keep");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("desktop environment clears invalid inherited DBus addresses", () => {
+  const env = desktopProcessEnvironment({
+    PATH: "/usr/bin",
+    DBUS_SESSION_BUS_ADDRESS: "autolaunch:",
+    DBUS_SYSTEM_BUS_ADDRESS: "invalid",
+  }, ":99");
+  assert.equal(env.DISPLAY, ":99");
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal("DBUS_SESSION_BUS_ADDRESS" in env, false);
+  assert.equal("DBUS_SYSTEM_BUS_ADDRESS" in env, false);
+});
 
 test("profile readiness rejects missing/empty Chromium metadata", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "profile-checkpoint-"));
