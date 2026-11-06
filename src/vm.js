@@ -116,6 +116,7 @@ async function probeCdp(timeoutMs = cdpStartupTimeoutMs, browserProcess = null) 
     if (browserProcess && (browserProcess.exitCode !== null || browserProcess.signalCode !== null)) {
       lastError = `Chromium process exited before CDP became ready (code=${browserProcess.exitCode}, signal=${browserProcess.signalCode})`;
       console.error(lastError);
+      await reportStartup(lastError);
       return false;
     }
     try {
@@ -130,7 +131,9 @@ async function probeCdp(timeoutMs = cdpStartupTimeoutMs, browserProcess = null) 
     }
     await sleep(500);
   }
-  console.error(`Chromium CDP did not become ready on 127.0.0.1:${cdpPort} after ${timeoutMs}ms: ${lastError}`);
+  const diagnostic = `Chromium CDP did not become ready on 127.0.0.1:${cdpPort} after ${timeoutMs}ms: ${lastError}`;
+  console.error(diagnostic);
+  await reportStartup(diagnostic);
   return false;
 }
 
