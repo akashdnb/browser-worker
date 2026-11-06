@@ -117,7 +117,8 @@ jobs:
                 created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo 0)"
                 age_seconds=$(( $(date +%s) - created_epoch ))
                 if [ "$created_epoch" -gt 0 ] && [ "$age_seconds" -gt 600 ]; then
-                  echo "::notice::Ignoring stale queued legacy Browser Worker run $candidate so it cannot block recovery." >&2
+                  echo "::notice::Cancelling stale queued legacy Browser Worker run $candidate so it cannot start after recovery." >&2
+                  gh api --method POST "repos/$REPO/actions/runs/$candidate/cancel" >/dev/null 2>&1 || true
                   continue
                 fi
               fi
@@ -131,7 +132,7 @@ jobs:
             exit 0
           fi
 
-          active_runs="$(gh api "repos/$REPO/actions/runs?status=in_progress&per_page=100" | jq -r --argjson current "$CURRENT_RUN_ID" '.workflow_runs[] | select(.id != $current) | select(.path == ".github/workflows/browser-worker.yml") | select((.display_title // "") | startswith("VM ") | not) | [.id,.created_at] | @tsv')"
+          active_runs="$(gh api "repos/$REPO/actions/runs?status=in_progress&per_page=100" | jq -r --argjson current "$CURRENT_RUN_ID" '.workflow_runs[] | select(.id != $current) | select(.path == ".github/workflows/browser-worker.yml") | select((.display_title // "") | startswith("VM ") | not) | [.id,.run_started_at] | @tsv')"
           active_count="$(printf '%s\n' "$active_runs" | sed '/^$/d' | wc -l | tr -d ' ')"
           if [ "$active_count" -gt 1 ]; then
             echo "::error::Found $active_count active legacy Browser Worker runs; refusing to guess which run owns the latest browser profile."
@@ -141,7 +142,7 @@ jobs:
           fi
 
           if [ "$active_count" -eq 1 ]; then
-            IFS="$(printf '\t')" read -r active_run_id active_created_at <<< "$active_runs"
+            IFS="$(printf '\t')" read -r active_run_id active_started_at <<< "$active_runs"
             created_epoch="$(date -d "$active_created_at" +%s 2>/dev/null || echo 0)"
             age_seconds=$(( $(date +%s) - created_epoch ))
             if [ "$worker_connected" != "false" ]; then
@@ -149,8 +150,8 @@ jobs:
               echo "should_start=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            if [ "$created_epoch" -le 0 ] || [ "$age_seconds" -lt 900 ]; then
-              echo "::notice::Legacy Browser Worker run $active_run_id is within its 15-minute startup grace; not replacing it yet."
+            if [ "$created_epoch" -le 0 ] || [ "$age_seconds" -lt 1800 ]; then
+              echo "::notice::Legacy Browser Worker run $active_run_id is within its 30-minute startup grace; not replacing it yet."
               echo "should_start=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
