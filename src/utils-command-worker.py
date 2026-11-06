@@ -185,6 +185,11 @@ async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
                     timeout=1200,
                 ))
             else:
+                await _status(
+                    websocket, "preparing", "APT package installation: skipped because package index refresh failed",
+                    task_id="apt-install", task_name="APT package installation",
+                    task_status="skipped",
+                )
                 tasks.append({
                     "id": "apt-install", "name": "APT package installation",
                     "status": "skipped", "message": "Skipped because APT index refresh failed",
@@ -203,7 +208,7 @@ async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
         if "playwright-chromium" in profiles:
             tasks.append({
                 "id": "playwright-chromium", "name": "Playwright Chromium",
-                "command": ["python", "-m", "playwright", "install", "chromium"],
+                "command": ["python", "-m", "playwright", "install", "--with-deps", "chromium"],
                 "timeout": 1200,
             })
         npm = list(dict.fromkeys(setup.get("npm_packages", [])))
