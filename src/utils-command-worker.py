@@ -208,6 +208,7 @@ async def run() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            setup_started.clear()
             print(f"Worker connection interrupted ({type(exc).__name__}); reconnecting in {delay}s", flush=True)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30)
