@@ -50,7 +50,7 @@ test("push handoff can replace an orphaned legacy run without waiting on its con
   assert.match(workflow, /format\('utils-vm-legacy-browser-session-\{0\}', github\.run_id\)/);
   assert.match(workflow, /cancel-in-progress: \$\{\{ inputs\.vm_id != '' \}\}/);
   assert.match(workflow, /gh run cancel "\$run_id"/);
-  assert.match(workflow, /timeout-minutes: 2/);
+  assert.match(workflow, /timeout-minutes: 10/);
   assert.ok(workflow.indexOf("Stop older worker runs after a push deployment") < workflow.indexOf("Set up Node.js"));
 });
 
@@ -74,5 +74,12 @@ test("scheduled recovery restores the cancelled worker's final profile", async (
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   assert.match(workflow, /source_run_id: \$\{\{ steps\.check\.outputs\.source_run_id \}\}/);
   assert.match(workflow, /inputs\.source_run_id \|\| needs\.guard\.outputs\.source_run_id/);
-  assert.match(workflow, /timeout-minutes: 2/);
+  assert.match(workflow, /timeout-minutes: 10/);
+});
+
+test("push handoff bypasses health probing so a deployment can recover a dead worker", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  const push = workflow.indexOf('if [ "$EVENT_NAME" = "push" ]; then');
+  const probe = workflow.indexOf("/vm/worker-health");
+  assert.ok(push >= 0 && probe > push);
 });
