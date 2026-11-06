@@ -242,7 +242,7 @@ async function probeCdp() {
   }
 }
 
-async function postMcp(payload, sessionId = null) {
+async function postMcp(payload, sessionId = null, timeoutMs = 120_000) {
   const headers = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
@@ -255,7 +255,7 @@ async function postMcp(payload, sessionId = null) {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const contentType = response.headers.get("content-type") ?? "";
   const body = await response.text();
@@ -268,9 +268,15 @@ async function postMcp(payload, sessionId = null) {
   };
 }
 
-async function ensureUpstreamInitialized() {
+async function ensureUpstreamInitialized({ deadline = Date.now() + 120_000 } = {}) {
   if (upstreamInitialized) return upstreamSessionId;
   if (upstreamInitializePromise) return upstreamInitializePromise;
+
+  const remainingMs = () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Playwright MCP initialization exceeded its startup deadline");
+    return remaining;
+  };
 
   upstreamInitializePromise = (async () => {
     const initializeResponse = await postMcp({
@@ -282,7 +288,7 @@ async function ensureUpstreamInitialized() {
         capabilities: {},
         clientInfo: { name: "utils-browser-worker", version: "0.1.0" },
       },
-    });
+    }, null, remainingMs());
     if (initializeResponse.status >= 400) {
       throw new Error(`Playwright MCP initialize failed (${initializeResponse.status}): ${initializeResponse.body || "empty response"}`);
     }
@@ -295,7 +301,7 @@ async function ensureUpstreamInitialized() {
       jsonrpc: "2.0",
       method: "notifications/initialized",
       params: {},
-    }, upstreamSessionId);
+    }, upstreamSessionId, remainingMs());
     if (initializedResponse.status >= 400) {
       throw new Error(`Playwright MCP initialized notification failed (${initializedResponse.status}): ${initializedResponse.body || "empty response"}`);
     }
@@ -328,7 +334,7 @@ async function recoverPlaywrightBackend({ deadline }) {
   await waitForMcp(mcpTimeoutMs);
   if (shuttingDown) throw new Error("Worker is shutting down");
 
-  await ensureUpstreamInitialized();
+  await ensureUpstreamInitialized({ deadline });
   upstreamReady = true;
   upstreamReadyReason = "";
   console.log(`Playwright MCP recovered and attached to Chromium CDP at ${cdpEndpoint}`);
