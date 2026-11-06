@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { removeChromiumAtomicWriteFiles } from "./chromium-profile-cleanup.mjs";
 
 const LOCK_NAMES = ["SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"];
 const DISPOSABLE_PATHS = [
@@ -69,10 +70,7 @@ export async function createProfileCheckpoint({
     for (const name of LOCK_NAMES) {
       await rm(resolve(stagedProfile, name), { force: true, recursive: true });
     }
-    const stagedEntries = await readdir(stagedProfile);
-    for (const name of stagedEntries.filter((entry) => entry.startsWith(".org.chromium."))) {
-      await rm(resolve(stagedProfile, name), { force: true, recursive: true });
-    }
+    await removeChromiumAtomicWriteFiles(stagedProfile);
     for (const name of DISPOSABLE_PATHS) {
       await rm(resolve(stagedProfile, name), { force: true, recursive: true });
     }
