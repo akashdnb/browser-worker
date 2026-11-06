@@ -36,6 +36,23 @@ if (!Number.isFinite(cdpStartupTimeoutMs) || cdpStartupTimeoutMs < 30_000 || cdp
 if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
 if (workerMode === "browser" && !chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
 
+async function reportStartup(message) {
+  try {
+    const response = await fetch(`${utilsBaseUrl}/vm/worker-log`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ message: `worker=${workerId} ${message}` }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) console.warn(`Could not publish VM startup diagnostic (HTTP ${response.status})`);
+  } catch (error) {
+    console.warn("Could not publish VM startup diagnostic:", error instanceof Error ? error.message : String(error));
+  }
+}
+
 const processes = [];
 const vncSockets = new Map();
 let stopping = false;
@@ -203,6 +220,7 @@ async function killStaleChromium() {
 
 async function startDesktop() {
   if (workerMode === "compute") return;
+  await reportStartup(`desktop startup beginning display=${display} cdp=${cdpPort} vnc=${vncPort}`);
   const env = desktopProcessEnvironment(process.env, display);
 
   // vm-supervisor may have terminated the wrapper process while its real
@@ -213,6 +231,7 @@ async function startDesktop() {
 
   start(["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "+extension", "RANDR"], env, { critical: true });
   await waitForDisplaySocket();
+  await reportStartup("Xvfb display socket is ready");
   start(["openbox"], env, { critical: true });
 
   const chromiumProcess = start([
@@ -233,11 +252,13 @@ async function startDesktop() {
 
   // Start VNC only after the display and browser are confirmed. A transient
   // x11vnc startup failure must not kill Chromium while CDP is booting.
+  await reportStartup("Chromium process launched; waiting for CDP");
   if (!(await probeCdp(cdpStartupTimeoutMs, chromiumProcess))) {
     await killStaleChromium();
     throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
   }
 
+  await reportStartup("Chromium CDP is ready; verifying persistent profile files");
   try {
     await waitForPersistentProfile();
   } catch (error) {
@@ -245,6 +266,7 @@ async function startDesktop() {
     throw error;
   }
 
+  await reportStartup("Chromium persistent profile verified; starting x11vnc");
   start([
     "x11vnc",
     "-display", display,
@@ -261,8 +283,7 @@ async function startDesktop() {
     "-input", "KMBC",
   ], env, { critical: true });
   await waitForPort("127.0.0.1", vncPort, 15_000);
-
-
+  await reportStartup("desktop startup complete; VNC port is ready");
 }
 function clampTimeoutSeconds(value) {
   const parsed = Number(value);
@@ -464,6 +485,7 @@ async function connectRelay(uri) {
 
     websocket.on("open", () => {
       const relay = new URL(uri);
+      void reportStartup(`relay WebSocket opened path=${relay.pathname}; waiting for vm.auth.ok`);
       console.log(`VM relay WebSocket opened at ${relay.origin}${relay.pathname}; authenticating worker ${workerId}`);
       websocket.send(JSON.stringify({
         type: "vm.hello",
@@ -492,6 +514,7 @@ async function connectRelay(uri) {
         authenticated = true;
         connected = true;
         console.log(`Interactive VM authenticated and connected to utils as ${workerId}`);
+        void reportStartup("relay authentication succeeded");
         if (workerMode === "browser") {
           console.log(`Shared Chromium is ready on CDP 127.0.0.1:${cdpPort} using ${userDataDir}`);
           void bootstrapBrowserMcpAfterCdp();
@@ -505,6 +528,7 @@ async function connectRelay(uri) {
       }
       if (message.type === "vm.auth.failed") {
         fatalError = new Error("Interactive VM authentication failed: utils rejected vm.hello");
+        void reportStartup("relay authentication failed: Utils rejected vm.hello");
         console.error(fatalError.message);
         websocket.close(1008, "worker authentication failed");
         return;
@@ -594,7 +618,10 @@ async function connectRelay(uri) {
       }
     });
 
-    websocket.on("error", (error) => console.error("Interactive VM WebSocket error:", error.message));
+    websocket.on("error", (error) => {
+      console.error("Interactive VM WebSocket error:", error.message);
+      void reportStartup(`relay WebSocket error: ${error.message}`);
+    });
     websocket.on("close", (code, reason) => {
       if (heartbeat) clearInterval(heartbeat);
       if (authTimer) clearTimeout(authTimer);
@@ -613,9 +640,11 @@ async function main() {
   if (workerMode === "browser") {
     await startDesktop();
     await waitForPort("127.0.0.1", vncPort);
+    await reportStartup("desktop startup returned; entering relay connection loop");
   }
 
   const uri = `${utilsBaseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}${workerSocketPath}`;
+  await reportStartup(`starting relay connection loop path=${workerSocketPath}`);
   console.log(`Starting interactive VM relay at ${uri} for worker ${workerId}`);
   let backoffMs = 2_000;
 
