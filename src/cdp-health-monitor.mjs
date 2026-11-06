@@ -128,6 +128,7 @@ export class CdpHealthMonitor {
           this.#notify(this.onReady);
           return true;
         } catch (error) {
+          if (this.stopped) break;
           const delayMs = Math.min(this.backoffMaxMs, this.backoffBaseMs * (2 ** attempt));
           const detail = error instanceof Error ? error.message : String(error);
           this.#notify(
