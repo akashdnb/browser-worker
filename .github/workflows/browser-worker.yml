@@ -59,6 +59,7 @@ jobs:
       cancel-in-progress: false
     outputs:
       should_start: ${{ steps.check.outputs.should_start }}
+      source_run_id: ${{ steps.check.outputs.source_run_id }}
     steps:
       - name: Skip if an interactive worker is already running
         id: check
@@ -69,6 +70,8 @@ jobs:
           SOURCE_RUN_ID: ${{ inputs.source_run_id || '' }}
           VM_ID: ${{ inputs.vm_id || '' }}
           EVENT_NAME: ${{ github.event_name }}
+          WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL || 'https://utils-zkiy.onrender.com/browser-worker' }}
         run: |
           if [ -n "$VM_ID" ]; then
             echo "Independent Utils VM worker $VM_ID; skipping legacy singleton guard"
@@ -80,6 +83,21 @@ jobs:
             echo "Explicit profile handoff from run $SOURCE_RUN_ID"
             echo "should_start=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+
+          worker_http_base="$(printf '%s' "$WORKER_URL" | sed -e 's#^wss://#https://#' -e 's#^ws://#http://#' -e 's#/browser-worker/*$##')"
+          health_file="$RUNNER_TEMP/legacy-worker-health.json"
+          health_code="$(curl -sS --connect-timeout 5 --max-time 12 -o "$health_file" -w '%{http_code}' -H "Authorization: Bearer $WORKER_TOKEN" "$worker_http_base/vm/worker-health" || true)"
+          worker_connected="unknown"
+          if [ "$health_code" = "200" ] && jq -e '.connected | type == "boolean"' "$health_file" >/dev/null 2>&1; then
+            worker_connected="$(jq -r '.connected' "$health_file")"
+            echo "Authenticated Utils legacy-worker health probe: connected=$worker_connected"
+          elif [ "$health_code" = "401" ]; then
+            echo "::error::Utils rejected the legacy worker health token; refusing to cancel any running browser session."
+            echo "should_start=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            echo "::warning::Utils legacy-worker health probe unavailable (HTTP $health_code); an existing run will be left untouched."
           fi
 
           legacy_run_ids() {
@@ -107,13 +125,64 @@ jobs:
             exit 0
           fi
 
-          active_run_id="$(legacy_run_ids in_progress | head -n 1 || true)"
+          if [ "$worker_connected" = "true" ]; then
+            echo "::notice::Legacy Browser Worker is already active or queued and Utils confirms its authenticated WebSocket is connected; skipping recovery."
+            echo "should_start=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          active_runs="$(gh api "repos/$REPO/actions/runs?status=in_progress&per_page=100" | jq -r --argjson current "$CURRENT_RUN_ID" '.workflow_runs[] | select(.id != $current) | select(.path == ".github/workflows/browser-worker.yml") | select((.display_title // "") | startswith("VM ") | not) | [.id,.created_at] | @tsv')"
+          active_count="$(printf '%s\n' "$active_runs" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$active_count" -gt 1 ]; then
+            echo "::error::Found $active_count active legacy Browser Worker runs; refusing to guess which run owns the latest browser profile."
+            printf '%s\n' "$active_runs"
+            echo "should_start=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$active_count" -eq 1 ]; then
+            IFS="$(printf '\t')" read -r active_run_id active_created_at <<< "$active_runs"
+            created_epoch="$(date -d "$active_created_at" +%s 2>/dev/null || echo 0)"
+            age_seconds=$(( $(date +%s) - created_epoch ))
+            if [ "$worker_connected" != "false" ]; then
+              echo "::notice::Utils health is unavailable and legacy run $active_run_id may still be serving traffic; leaving it untouched."
+              echo "should_start=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$created_epoch" -le 0 ] || [ "$age_seconds" -lt 900 ]; then
+              echo "::notice::Legacy Browser Worker run $active_run_id is within its 15-minute startup grace; not replacing it yet."
+              echo "should_start=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Utils reports no connected legacy worker; cancelling orphaned Actions run $active_run_id after ${age_seconds}s."
+            gh api --method POST "repos/$REPO/actions/runs/$active_run_id/cancel" >/dev/null
+            completed=false
+            for attempt in $(seq 1 90); do
+              run_status="$(gh api "repos/$REPO/actions/runs/$active_run_id" --jq '.status' 2>/dev/null || echo unknown)"
+              if [ "$run_status" = "completed" ]; then
+                completed=true
+                break
+              fi
+              sleep 5
+            done
+            if [ "$completed" != "true" ]; then
+              echo "::error::Orphaned Browser Worker run $active_run_id did not finish cancellation; refusing to start a competing browser session."
+              echo "should_start=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "source_run_id=$active_run_id" >> "$GITHUB_OUTPUT"
+            echo "Orphaned worker run completed; replacement will restore its final browser profile."
+            echo "should_start=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           queued_run_id="$(legacy_run_ids queued | head -n 1 || true)"
-          if [ -n "$active_run_id" ] || [ -n "$queued_run_id" ]; then
-            echo "::notice::Legacy Browser Worker is already active or queued (active=$active_run_id queued=$queued_run_id); skipping this recovery check."
+          if [ -n "$queued_run_id" ]; then
+            echo "::notice::Legacy Browser Worker is already active or queued (queued=$queued_run_id); skipping this recovery check."
             echo "should_start=false" >> "$GITHUB_OUTPUT"
           else
-            echo "No other Browser Worker run is active or queued"
+            echo "No connected legacy worker or active legacy Actions run; starting a replacement."
             echo "should_start=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -350,7 +419,7 @@ jobs:
         if: ${{ inputs.worker_mode != 'compute' && !inputs.vm_id }}
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id || needs.guard.outputs.source_run_id || '' }}
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
         run: |
           export BROWSER_WORKER_PROFILE_DIR="$GITHUB_WORKSPACE/browser-worker-state/live-profile"
