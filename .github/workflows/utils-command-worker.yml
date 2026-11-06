@@ -1,5 +1,5 @@
 name: Utils Command Worker
-run-name: Utils worker ${{ inputs.worker_id }} — ${{ inputs.worker_name }}
+run-name: Utils worker ${{ inputs.worker_id }} — ${{ inputs.worker_name }} [${{ inputs.lifetime_hours }}h:${{ join(fromJSON(inputs.profiles), '+') }}]
 
 on:
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
   worker:
     name: Personal command worker
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: ${{ inputs.lifetime_hours == '6' && 350 || inputs.lifetime_hours * 60 }}
     steps:
       - name: Check out worker host repository
         uses: actions/checkout@v4
@@ -53,6 +53,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node.js
+        if: contains(fromJSON(inputs.profiles), 'node')
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Provision environment profiles and custom tools
         env:
           PROFILES_JSON: ${{ inputs.profiles }}
@@ -62,7 +68,11 @@ jobs:
           import json, os, subprocess
           profiles = json.loads(os.environ["PROFILES_JSON"])
           setup = json.loads(os.environ["CUSTOM_SETUP_JSON"])
-          if not isinstance(profiles, list) or not isinstance(setup, dict):
+          allowed_profiles = {"minimal", "python", "node", "playwright-chromium", "devops"}
+          allowed_setup = {"apt_packages", "pip_packages", "npm_packages", "commands"}
+          if (not isinstance(profiles, list) or not profiles
+                  or any(profile not in allowed_profiles for profile in profiles)
+                  or not isinstance(setup, dict) or set(setup) - allowed_setup):
               raise SystemExit("Invalid environment configuration")
           apt = list(setup.get("apt_packages", []))
           if "devops" in profiles:
