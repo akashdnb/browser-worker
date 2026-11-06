@@ -1,65 +1,34 @@
-name: Browser Worker Secondary
-run-name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
+name: Browser Worker
 
 on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: "Previous worker run whose browser profile must be restored (legacy worker only)"
+        description: "Previous worker run whose browser profile must be restored"
         required: false
         type: string
-      vm_id:
-        description: "Stable Utils VM instance ID; leave blank for the legacy shared browser worker"
-        required: false
-        type: string
-      worker_mode:
-        description: "compute or browser"
-        required: false
-        type: choice
-        options:
-          - compute
-          - browser
-      size:
-        description: "GitHub-hosted runner size (allowlisted in this workflow)"
-        required: false
-        type: choice
-        options:
-          - standard
-          - large
-      utils_base_url:
-        description: "Base URL of the Utils control plane for VM fleet bootstrap"
-        required: false
-        type: string
-        default: https://utils-zkiy.onrender.com
   push:
     branches:
       - main
-  # Self-heal the legacy interactive browser if its long-lived Actions run is cancelled.
-  # The guard job is cheap and skips whenever a legacy worker is already active.
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "17 */6 * * *"
 
 concurrency:
-  # Let each recovery/push guard start; it explicitly cancels older legacy runs.
-  # A unique run group prevents a stuck old guard from blocking its replacement.
-  group: ${{ github.workflow }}-${{ inputs.vm_id || 'legacy-browser-session' }}-${{ github.run_id }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && 'push' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: write
   actions: write
-  id-token: write
 
 jobs:
   guard:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     concurrency:
-      group: browser-worker-guard-${{ github.ref }}-${{ inputs.vm_id || 'legacy' }}-v7
+      group: browser-worker-guard-${{ github.ref }}
       cancel-in-progress: false
     outputs:
       should_start: ${{ steps.check.outputs.should_start }}
-      source_run_id: ${{ steps.check.outputs.source_run_id }}
     steps:
       - name: Skip if an interactive worker is already running
         id: check
@@ -68,400 +37,58 @@ jobs:
           REPO: ${{ github.repository }}
           CURRENT_RUN_ID: ${{ github.run_id }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id || '' }}
-          VM_ID: ${{ inputs.vm_id || '' }}
           EVENT_NAME: ${{ github.event_name }}
-          WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          WORKER_URL: https://utils-zkiy.onrender.com/browser-worker
         run: |
-          if [ -n "$VM_ID" ]; then
-            echo "Independent Utils VM worker $VM_ID; skipping legacy singleton guard"
-            echo "should_start=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           if [ -n "$SOURCE_RUN_ID" ]; then
             echo "Explicit profile handoff from run $SOURCE_RUN_ID"
             echo "should_start=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if [ "$EVENT_NAME" = "push" ]; then
-            echo "Push handoff uses the legacy browser job concurrency group to replace the prior worker"
-            echo "should_start=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          worker_http_base="$(printf '%s' "$WORKER_URL" | sed -e 's#^wss://#https://#' -e 's#^ws://#http://#' -e 's#/browser-worker/*$##')"
-          health_file="$RUNNER_TEMP/legacy-worker-health.json"
-          health_code="$(curl -sS --connect-timeout 5 --max-time 12 -o "$health_file" -w '%{http_code}' -H "Authorization: Bearer $WORKER_TOKEN" "$worker_http_base/vm/worker-health" || true)"
-          worker_connected="unknown"
-          if [ "$health_code" = "200" ] && jq -e '.connected | type == "boolean"' "$health_file" >/dev/null 2>&1; then
-            worker_connected="$(jq -r '.connected' "$health_file")"
-            echo "Authenticated Utils legacy-worker health probe: connected=$worker_connected"
-          elif [ "$health_code" = "401" ]; then
-            echo "::error::Utils rejected the legacy worker health token; refusing to cancel any running browser session."
-            echo "should_start=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          else
-            echo "::warning::Utils legacy-worker health probe unavailable (HTTP $health_code); an existing run will be left untouched."
-          fi
-
-          legacy_run_ids() {
-            local run_state="$1"
-            while IFS='|' read -r candidate created_at run_name; do
-              [ -n "$candidate" ] || continue
-              case "$run_name" in
-                "VM "*) continue ;;
-              esac
-              if [ "$run_state" = "queued" ]; then
-                created_epoch="$(date -d "$created_at" +%s 2>/dev/null || echo 0)"
-                age_seconds=$(( $(date +%s) - created_epoch ))
-                if [ "$created_epoch" -gt 0 ] && [ "$age_seconds" -gt 600 ]; then
-                  echo "::notice::Cancelling stale queued legacy Browser Worker run $candidate so it cannot start after recovery." >&2
-                  gh api --method POST "repos/$REPO/actions/runs/$candidate/cancel" >/dev/null 2>&1 || true
-                  continue
-                fi
-              fi
-              echo "$candidate"
-            done < <(gh api "repos/$REPO/actions/runs?status=$run_state&per_page=100" | jq -r --argjson current "$CURRENT_RUN_ID" '.workflow_runs[] | select(.id != $current) | select(.path == ".github/workflows/browser-worker.yml") | [.id,.created_at,.display_title] | join("|")')
-          }
-
-          if [ "$worker_connected" = "true" ]; then
-            echo "::notice::Legacy Browser Worker is already active or queued and Utils confirms its authenticated WebSocket is connected; skipping recovery."
-            echo "should_start=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          active_runs="$(gh api "repos/$REPO/actions/runs?status=in_progress&per_page=100" | jq -r --argjson current "$CURRENT_RUN_ID" '.workflow_runs[] | select(.id != $current) | select(.path == ".github/workflows/browser-worker.yml") | select((.display_title // "") | startswith("VM ") | not) | [.id,.run_started_at] | @tsv')"
-          active_count="$(printf '%s\n' "$active_runs" | sed '/^$/d' | wc -l | tr -d ' ')"
-          if [ "$active_count" -gt 1 ]; then
-            echo "::error::Found $active_count active legacy Browser Worker runs; refusing to guess which run owns the latest browser profile."
-            printf '%s\n' "$active_runs"
-            echo "should_start=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "$active_count" -eq 1 ]; then
-            IFS="$(printf '\t')" read -r active_run_id active_started_at <<< "$active_runs"
-            created_epoch="$(date -d "$active_started_at" +%s 2>/dev/null || echo 0)"
-            age_seconds=$(( $(date +%s) - created_epoch ))
-            if [ "$worker_connected" != "false" ]; then
-              echo "::notice::Utils health is unavailable and legacy run $active_run_id may still be serving traffic; leaving it untouched."
-              echo "should_start=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if [ "$created_epoch" -le 0 ] || [ "$age_seconds" -lt 1800 ]; then
-              echo "::notice::Legacy Browser Worker run $active_run_id is within its 30-minute startup grace; not replacing it yet."
-              echo "should_start=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-
-            echo "Utils reports no connected legacy worker; cancelling orphaned Actions run $active_run_id after ${age_seconds}s."
-            gh api --method POST "repos/$REPO/actions/runs/$active_run_id/cancel" >/dev/null
-            completed=false
-            for attempt in $(seq 1 90); do
-              run_status="$(gh api "repos/$REPO/actions/runs/$active_run_id" --jq '.status' 2>/dev/null || echo unknown)"
-              if [ "$run_status" = "completed" ]; then
-                completed=true
-                break
-              fi
-              sleep 5
+          active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
+          if [ -n "$active_run_id" ] && [ "$EVENT_NAME" = "push" ]; then
+            echo "::notice::Replacing stale Browser Worker run $active_run_id after a deployment push."
+            gh run cancel "$active_run_id" --repo "$REPO" || true
+            for attempt in $(seq 1 60); do
+              status="$(gh run view "$active_run_id" --repo "$REPO" --json status --jq '.status' 2>/dev/null || true)"
+              if [ "$status" != "in_progress" ] && [ "$status" != "queued" ]; then break; fi
+              sleep 2
             done
-            if [ "$completed" != "true" ]; then
-              echo "::error::Orphaned Browser Worker run $active_run_id did not finish cancellation; refusing to start a competing browser session."
-              echo "should_start=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "source_run_id=$active_run_id" >> "$GITHUB_OUTPUT"
-            echo "Orphaned worker run completed; replacement will restore its final browser profile."
-            echo "should_start=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            active_run_id="$(gh run list --repo "$REPO" --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq ".[] | select(.databaseId != ${CURRENT_RUN_ID}) | .databaseId" | head -n 1 || true)"
           fi
-
-          queued_run_id="$(legacy_run_ids queued | head -n 1 || true)"
-          if [ -n "$queued_run_id" ]; then
-            echo "::notice::Legacy Browser Worker is already active or queued (queued=$queued_run_id); skipping this recovery check."
+          if [ -n "$active_run_id" ]; then
+            echo "::notice::Skipping $EVENT_NAME start: Browser Worker run $active_run_id is already active."
             echo "should_start=false" >> "$GITHUB_OUTPUT"
           else
-            echo "No connected legacy worker or active legacy Actions run; starting a replacement."
+            echo "No other Browser Worker run is active"
             echo "should_start=true" >> "$GITHUB_OUTPUT"
           fi
 
   browser:
     needs: guard
     if: needs.guard.outputs.should_start == 'true'
-    runs-on: ${{ inputs.size == 'large' && vars.VM_LARGE_RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 350
-    name: ${{ inputs.vm_id && format('VM {0}', inputs.vm_id) || 'Legacy browser worker' }}
-    concurrency:
-      # Fleet VMs remain serialized per VM ID. Legacy recovery runs must not
-      # be blocked by an orphaned in-progress Actions run; the push handoff
-      # step below cancels the previous legacy run as soon as this job starts.
-      group: ${{ inputs.vm_id && format('utils-vm-{0}', inputs.vm_id) || format('utils-vm-legacy-browser-session-{0}', github.run_id) }}
-      cancel-in-progress: ${{ inputs.vm_id != '' }}
     steps:
       - name: Checkout worker configuration
         uses: actions/checkout@v4
 
-      - name: Stop older worker runs after a push deployment
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CURRENT_RUN_ID: ${{ github.run_id }}
-        run: |
-          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 50 --json databaseId --jq '.[].databaseId'); do
-            if [ "$run_id" = "$CURRENT_RUN_ID" ]; then continue; fi
-            job_names="$(gh run view "$run_id" --json jobs --jq '.jobs[].name' 2>/dev/null || true)"
-            if printf '%s\n' "$job_names" | grep -q '^VM '; then
-              echo "::notice::Leaving fleet VM run $run_id active during legacy worker deployment."
-              continue
-            fi
-            gh run cancel "$run_id" || true
-          done
-
-      - name: Prepare VM identity and OIDC bootstrap
-        id: bootstrap
-        if: ${{ inputs.vm_id }}
-        env:
-          VM_ID: ${{ inputs.vm_id }}
-          BOOTSTRAP_URL: ${{ inputs.utils_base_url }}/vm-fleet/bootstrap
-        run: |
-          set -euo pipefail
-          test -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" && test -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}"
-          oidc="$(curl -fsS --retry 5 --retry-delay 2 --retry-max-time 30 --retry-connrefused -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=utils-vm-bootstrap" | jq -er .value)"
-          response="$(curl -fsS --retry 8 --retry-delay 2 --retry-max-time 90 --retry-connrefused -X POST "$BOOTSTRAP_URL" -H "Authorization: Bearer $oidc" -H "Content-Type: application/json" --data "$(jq -nc --arg vm_id "$VM_ID" '{vm_id:$vm_id}')")"
-          worker_token="$(jq -er .worker_token <<< "$response")"
-          vm_spec="$(jq -ec .spec <<< "$response")"
-          worker_mode="$(jq -er .worker_mode <<< "$response")"
-          browser_url="$(jq -er .browser_worker_ws_url <<< "$response")"
-          vm_url="$(jq -er .vm_worker_ws_url <<< "$response")"
-          lifecycle_mode="$(jq -r '.lifecycle.mode // "on_demand"' <<< "$vm_spec")"
-          profile_persistent="$(jq -r '.browser.persistent_profile // true' <<< "$vm_spec")"
-          profile_key="$(jq -r '.browser_profile_encryption_key // empty' <<< "$response")"
-          if [ "$worker_mode" = "browser" ] && [ "$lifecycle_mode" = "persistent" ] && [ "$profile_persistent" = "true" ] && [ -z "$profile_key" ]; then
-            echo "::error::Persistent browser VMs require VM_BROWSER_PROFILE_ENCRYPTION_KEY on the Utils service."
-            exit 1
-          fi
-          echo "::add-mask::$worker_token"
-          if [ -n "$profile_key" ]; then
-            echo "::add-mask::$profile_key"
-            echo "BROWSER_WORKER_PROFILE_ENCRYPTION_KEY=$profile_key" >> "$GITHUB_ENV"
-          fi
-          printf '%s' "$vm_spec" > "$RUNNER_TEMP/vm-spec.json"
-          {
-            echo "VM_ID=$VM_ID"
-            echo "VM_SPEC_PATH=$RUNNER_TEMP/vm-spec.json"
-            echo "VM_WORKER_TOKEN=$worker_token"
-            echo "UTILS_BROWSER_WORKER_TOKEN=$worker_token"
-            echo "UTILS_BROWSER_WORKER_URL=$browser_url"
-            echo "UTILS_VM_FLEET_URL=$vm_url"
-            echo "VM_WORKER_SOCKET_PATH=/vm-fleet-worker"
-            echo "WORKER_MODE=$worker_mode"
-            echo "BROWSER_WORKER_PROFILE_DIR=$RUNNER_TEMP/vm-profile-$VM_ID"
-            echo "PLAYWRIGHT_MCP_USER_DATA_DIR=$RUNNER_TEMP/vm-profile-$VM_ID"
-            echo "BROWSER_WORKER_CHECKPOINT_DIR=$RUNNER_TEMP/vm-checkpoint-$VM_ID"
-            echo "BROWSER_WORKER_STATE_FILE=$RUNNER_TEMP/vm-checkpoint-$VM_ID/storage-state.json"
-            echo "BROWSER_WORKER_STATE_RELEASE_TAG=vm-profile-$VM_ID"
-            echo "VM_LIFECYCLE_MODE=$lifecycle_mode"
-            echo "VM_STARTUP_TIMEOUT_SECONDS=$(jq -r '.startup.startup_timeout_seconds // 900' <<< "$vm_spec")"
-            echo "VM_BROWSER_PERSISTENT_PROFILE=$(jq -r '.browser.persistent_profile // true' <<< "$vm_spec")"
-            max_lifetime="$(jq -r '.lifecycle.max_lifetime_minutes // 345' <<< "$vm_spec")"
-            if [ "$max_lifetime" -gt 345 ]; then echo "::error::GitHub Actions VM maximum lifetime is 345 minutes"; exit 1; fi
-            [ "$max_lifetime" -ge 1 ] || { echo "::error::VM maximum lifetime must be at least one minute"; exit 1; }
-            echo "VM_MAX_LIFETIME_MINUTES=$max_lifetime" >> "$GITHUB_ENV"
-            worker_seconds=$((max_lifetime * 60 - 60))
-            [ "$worker_seconds" -ge 60 ] || worker_seconds=60
-            [ "$worker_seconds" -le 21000 ] || worker_seconds=21000
-            echo "WORKER_MAX_SECONDS=$worker_seconds" >> "$GITHUB_ENV"
-            echo "VM_PYTHON_VERSION=$(jq -r '.runtime.python // "3.12"' <<< "$vm_spec")"
-            echo "VM_NODE_VERSION=$(jq -r '.runtime.node // "22"' <<< "$vm_spec")"
-          } >> "$GITHUB_ENV"
-          {
-            echo "python_version=$(jq -r '.runtime.python // "3.12"' <<< "$vm_spec")"
-            echo "node_version=$(jq -r '.runtime.node // "22"' <<< "$vm_spec")"
-            echo "worker_mode=$worker_mode"
-          } >> "$GITHUB_OUTPUT"
-          # VM startup environment is masked before being exposed to subsequent steps.
-          while IFS= read -r entry; do
-            key="$(jq -r .key <<< "$entry")"
-            value="$(jq -r .value <<< "$entry")"
-            echo "::add-mask::$value"
-            delimiter="VM_ENV_$(openssl rand -hex 12)"
-            {
-              printf '%s<<%s\n' "$key" "$delimiter"
-              printf '%s\n' "$value"
-              printf '%s\n' "$delimiter"
-            } >> "$GITHUB_ENV"
-          done < <(jq -c '.startup.environment // {} | to_entries[]' <<< "$vm_spec")
-          # Secret references are resolved by a dedicated secret bridge, not by workflow inputs.
-          if [ "$(jq '(.startup.secret_refs // {}) | length' <<< "$vm_spec")" -gt 0 ]; then
-            echo "::warning::VM has secret_refs; values are not injected until a supported secret resolver is configured."
-          fi
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ steps.bootstrap.outputs.node_version || '22' }}
-
-      - name: Set up Python
-        if: ${{ inputs.vm_id }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ steps.bootstrap.outputs.python_version || '3.12' }}
-
-      - name: Validate requested VM resources
-        if: ${{ inputs.vm_id }}
-        env:
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          WORKER_SIZE: ${{ inputs.size || 'standard' }}
-          LARGE_RUNNER_LABEL: ${{ vars.VM_LARGE_RUNNER_LABEL }}
-          LARGE_RUNNER_CPU: ${{ vars.VM_LARGE_RUNNER_CPU }}
-          LARGE_RUNNER_MEMORY_MB: ${{ vars.VM_LARGE_RUNNER_MEMORY_MB }}
-          LARGE_RUNNER_DISK_GB: ${{ vars.VM_LARGE_RUNNER_DISK_GB }}
-        run: |
-          node --input-type=module <<'NODE'
-          const fs = await import('node:fs/promises');
-          const spec = JSON.parse(await fs.readFile(process.env.VM_SPEC_PATH, 'utf8'));
-          const cpu = Number(spec.resources?.cpu ?? 2);
-          const memory = Number(spec.resources?.memory_mb ?? 4096);
-          const disk = Number(spec.resources?.disk_gb ?? 10);
-          const gpu = spec.resources?.gpu;
-          const size = process.env.WORKER_SIZE;
-          const standard = {cpu: 2, memory_mb: 8192, disk_gb: 14};
-          const large = {
-            cpu: Number(process.env.LARGE_RUNNER_CPU),
-            memory_mb: Number(process.env.LARGE_RUNNER_MEMORY_MB),
-            disk_gb: Number(process.env.LARGE_RUNNER_DISK_GB),
-          };
-          if (gpu) throw new Error("GPU is not available on the configured GitHub Actions runner profiles");
-          let profile = standard;
-          if (size === "large") {
-            if (!process.env.LARGE_RUNNER_LABEL || !Number.isFinite(large.cpu) ||
-                !Number.isFinite(large.memory_mb) || !Number.isFinite(large.disk_gb)) {
-              throw new Error("Configure VM_LARGE_RUNNER_LABEL, VM_LARGE_RUNNER_CPU, VM_LARGE_RUNNER_MEMORY_MB and VM_LARGE_RUNNER_DISK_GB as browser-worker repository variables before requesting a large VM");
-            }
-            profile = large;
-          } else if (size !== "standard") {
-            throw new Error("Unsupported GitHub runner size");
-          }
-          if (cpu > profile.cpu || memory > profile.memory_mb || disk > profile.disk_gb) {
-            throw new Error(`Requested resources (${cpu} CPU, ${memory} MB, ${disk} GB) exceed the ${size} GitHub runner profile: ${JSON.stringify(profile)}`);
-          }
-          NODE
-
-      - name: Install requested runtimes and packages
-        env:
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
-          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
-        run: |
-          set -euo pipefail
-          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get update
-          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y jq curl ca-certificates
-          VM_SPEC="$(cat "$VM_SPEC_PATH" 2>/dev/null || echo '{}')"
-          mapfile -t apt_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_apt[]?')
-          if [ "${#apt_packages[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y -- "${apt_packages[@]}"; fi
-          mapfile -t pip_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_pip[]?')
-          if [ "${#pip_packages[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" python -m pip install --user --break-system-packages "${pip_packages[@]}"; fi
-          mapfile -t npm_packages < <(echo "$VM_SPEC" | jq -r '.runtime.packages_npm[]?')
-          if [ "${#npm_packages[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" npm install --global "${npm_packages[@]}"; fi
-          mapfile -t cli_tools < <(echo "$VM_SPEC" | jq -r '.runtime.cli_tools[]?')
-          if [ "${#cli_tools[@]}" -gt 0 ]; then timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y -- "${cli_tools[@]}"; fi
-          if [ "$WORKER_MODE" = "browser" ]; then
-            timeout "$VM_STARTUP_TIMEOUT_SECONDS" npm install --no-save ws@^8.18.0 @playwright/mcp@0.0.83
-          else
-            timeout "$VM_STARTUP_TIMEOUT_SECONDS" npm install --no-save ws@^8.18.0
-          fi
-
-      - name: Install Playwright-managed Chromium and OS dependencies
-        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
-        env:
-          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
-        run: |
-          set -euo pipefail
-          playwright_cli="node_modules/playwright-core/cli.js"
-          if [ ! -f "$playwright_cli" ]; then
-            playwright_cli="node_modules/@playwright/mcp/node_modules/playwright-core/cli.js"
-          fi
-          test -f "$playwright_cli" || {
-            echo "::error::The Playwright MCP dependency did not install playwright-core; refusing to fall back to system Chromium."
-            exit 1
-          }
-          timeout "$VM_STARTUP_TIMEOUT_SECONDS" node "$playwright_cli" install --with-deps chromium
-          chromium_bin="$(node -e 'const { chromium } = require("playwright-core"); process.stdout.write(chromium.executablePath())')"
-          test -x "$chromium_bin" || {
-            echo "::error::Playwright-managed Chromium is missing at $chromium_bin"
-            exit 1
-          }
-          echo "PLAYWRIGHT_CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
-          echo "Installed Playwright-managed Chromium: $("$chromium_bin" --version)"
-
-      - name: Run VM setup scripts
-        if: ${{ inputs.vm_id }}
-        env:
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
-        run: |
-          set -euo pipefail
-          while IFS= read -r script_json; do
-            script="$(jq -r . <<< "$script_json")"
-            timeout "$VM_STARTUP_TIMEOUT_SECONDS" bash -euo pipefail -c "$script"
-          done < <(jq -c '.startup.setup_scripts[]? // empty' "$VM_SPEC_PATH")
+          node-version: "22"
 
       - name: Set up interactive desktop dependencies
-        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
-        env:
-          VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
         run: |
-          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get update
-          timeout "$VM_STARTUP_TIMEOUT_SECONDS" sudo apt-get install -y xvfb x11vnc openbox xdotool
-
-      - name: Configure legacy worker environment
-        if: ${{ !inputs.vm_id }}
-        env:
-          DEFAULT_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          DEFAULT_PROFILE_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
-        run: |
-          test -n "$DEFAULT_WORKER_TOKEN" || { echo "::error::Legacy browser worker token is missing"; exit 1; }
-          {
-            echo "WORKER_MODE=browser"
-            echo "UTILS_BROWSER_WORKER_TOKEN=$DEFAULT_WORKER_TOKEN"
-            echo "UTILS_BROWSER_WORKER_URL=https://utils-zkiy.onrender.com/browser-worker"
-            echo "VM_WORKER_SOCKET_PATH=/vm-worker"
-          } >> "$GITHUB_ENV"
-          if [ -n "$DEFAULT_PROFILE_KEY" ]; then
-            echo "BROWSER_WORKER_PROFILE_ENCRYPTION_KEY=$DEFAULT_PROFILE_KEY" >> "$GITHUB_ENV"
-          fi
-
-      - name: Verify authenticated legacy worker endpoint
-        if: ${{ !inputs.vm_id }}
-        env:
-          WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          WORKER_URL: https://utils-zkiy.onrender.com/browser-worker
-        run: |
-          set -euo pipefail
-          test -n "$WORKER_TOKEN" || { echo "::error::Legacy browser worker token is missing"; exit 1; }
-          worker_http_base="$(printf '%s' "$WORKER_URL" | sed -e 's#^wss://#https://#' -e 's#^ws://#http://#' -e 's#/browser-worker/*$##')"
-          health_file="$RUNNER_TEMP/legacy-worker-health.json"
-          health_code="$(curl -sS --connect-timeout 5 --max-time 15 -o "$health_file" -w '%{http_code}' -H "Authorization: Bearer $WORKER_TOKEN" "$worker_http_base/vm/worker-health" || true)"
-          if [ "$health_code" = "401" ]; then
-            echo "::error::Utils rejected UTILS_BROWSER_WORKER_TOKEN; it does not match RENDER_MCP_BROWSER_WORKER_TOKEN."
-            exit 1
-          fi
-          if [ "$health_code" != "200" ]; then
-            echo "::error::Utils legacy-worker health endpoint returned HTTP $health_code; refusing to start an unverified worker."
-            cat "$health_file" 2>/dev/null || true
-            exit 1
-          fi
-          jq -e '.connected | type == "boolean"' "$health_file" >/dev/null || { echo "::error::Utils health response is invalid"; exit 1; }
-          echo "Authenticated Utils worker token and health endpoint verified: $(jq -r '.connected' "$health_file")"
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc openbox xdotool
 
       - name: Restore previous browser profile
-        if: ${{ inputs.worker_mode != 'compute' && !inputs.vm_id }}
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id || needs.guard.outputs.source_run_id || '' }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
         run: |
           export BROWSER_WORKER_PROFILE_DIR="$GITHUB_WORKSPACE/browser-worker-state/live-profile"
           mkdir -p browser-worker-state "$BROWSER_WORKER_PROFILE_DIR"
@@ -635,243 +262,88 @@ jobs:
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" >/dev/null 2>&1 || true
           done <<< "$artifact_ids"
 
-      - name: Restore per-VM browser profile
-        if: ${{ inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' && env.VM_LIFECYCLE_MODE == 'persistent' && env.VM_BROWSER_PERSISTENT_PROFILE == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VM_ID: ${{ inputs.vm_id }}
-          VM_LIFECYCLE_MODE: ${{ env.VM_LIFECYCLE_MODE }}
-          PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
-          PROFILE_RELEASE: vm-profile-${{ inputs.vm_id }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$PROFILE_DIR"
-          if [ "$VM_LIFECYCLE_MODE" != "persistent" ]; then
-            echo "Profile persistence is disabled for $VM_LIFECYCLE_MODE VM."
-            exit 0
-          fi
-          if [ -z "$BROWSER_WORKER_PROFILE_ENCRYPTION_KEY" ]; then
-            echo "::error::VM_BROWSER_PROFILE_ENCRYPTION_KEY must be configured on the Utils Render service."
-            exit 1
-          fi
-          if gh release view "$PROFILE_RELEASE" >/dev/null 2>&1; then
-            asset="$(gh release view "$PROFILE_RELEASE" --json assets --jq '.assets[].name | select(startswith("browser-worker-profile-") and endswith(".tar.gz.enc"))' | sort -r | head -n 1)"
-            if [ -z "$asset" ]; then
-              echo "::error::Persistent profile release exists but contains no encrypted profile archive."
-              exit 1
-            fi
-            restore_dir="$RUNNER_TEMP/profile-restore-$VM_ID"
-            mkdir -p "$restore_dir"
-            gh release download "$PROFILE_RELEASE" --pattern "$asset" --dir "$restore_dir"
-            node src/profile-archive-crypto.mjs decrypt "$restore_dir/$asset" "$restore_dir/profile.tar.gz"
-            tar -tzf "$restore_dir/profile.tar.gz" | grep -Fx "browser-worker-profile/Local State" >/dev/null
-            tar -tzf "$restore_dir/profile.tar.gz" | grep -Fx "browser-worker-profile/Default/Preferences" >/dev/null
-            rm -rf "$PROFILE_DIR"
-            mkdir -p "$restore_dir/extracted"
-            tar -xzf "$restore_dir/profile.tar.gz" -C "$restore_dir/extracted"
-            mv "$restore_dir/extracted/browser-worker-profile" "$PROFILE_DIR"
-            echo "Restored encrypted profile for VM $VM_ID"
-          else
-            echo "No prior profile exists for VM $VM_ID; starting a fresh persistent profile."
-          fi
+      - name: Install upstream Playwright MCP
+        run: npm install --no-save @playwright/mcp@0.0.83 ws@^8.18.0
+
+      - name: Install Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
 
       - name: Resolve Chromium executable
-        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
         run: |
-          set -euo pipefail
-          chromium_bin="${PLAYWRIGHT_CHROMIUM_BIN:-}"
-          if [ -z "$chromium_bin" ]; then
-            chromium_bin="$(node -e 'const { chromium } = require("playwright-core"); process.stdout.write(chromium.executablePath())')"
-          fi
-          test -x "$chromium_bin" || {
-            echo "::error::Playwright-managed Chromium is not executable at $chromium_bin"
-            exit 1
-          }
+          chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
+          test -n "$chromium_bin"
           echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
-          echo "Using pinned Playwright Chromium: $("$chromium_bin" --version)"
+          echo "Using shared interactive Chromium at $chromium_bin"
 
-      - name: Verify Chromium DevTools startup
-        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
+      - name: Stop older worker runs after a push deployment
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
         run: |
-          set -euo pipefail
-          test -x "$PLAYWRIGHT_CHROMIUM_BIN"
-          smoke_dir="$(mktemp -d)"
-          log_file="$RUNNER_TEMP/chromium-cdp-smoke.log"
-          port=19223
-          setsid "$PLAYWRIGHT_CHROMIUM_BIN" \
-            --headless=new \
-            --no-sandbox \
-            --disable-dev-shm-usage \
-            --disable-gpu \
-            --disable-extensions \
-            --no-first-run \
-            --no-default-browser-check \
-            --remote-debugging-address=127.0.0.1 \
-            --remote-debugging-port="$port" \
-            --remote-allow-origins='*' \
-            --user-data-dir="$smoke_dir" \
-            about:blank >"$log_file" 2>&1 &
-          chromium_pid=$!
-          cleanup() {
-            kill -TERM -- "-$chromium_pid" 2>/dev/null || true
-            sleep 0.2
-            kill -KILL -- "-$chromium_pid" 2>/dev/null || true
-            wait "$chromium_pid" 2>/dev/null || true
-            rm -rf "$smoke_dir"
-          }
-          trap cleanup EXIT
-          ready=false
-          for attempt in $(seq 1 30); do
-            if curl -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:$port/json/version" > "$smoke_dir/version.json"; then
-              ready=true
-              break
-            fi
-            if ! kill -0 "$chromium_pid" 2>/dev/null; then
-              break
-            fi
-            sleep 1
+          for run_id in $(gh run list --workflow browser-worker.yml --status in_progress --limit 20 --json databaseId --jq '.[].databaseId'); do
+            if [ "$run_id" != "$CURRENT_RUN_ID" ]; then gh run cancel "$run_id" || true; fi
           done
-          if [ "$ready" != "true" ]; then
-            echo "::error::Playwright Chromium failed to open its DevTools endpoint on port $port"
-            tail -n 100 "$log_file" || true
-            exit 1
-          fi
-          echo "Chromium CDP smoke test passed: $(jq -r '.Browser // "unknown browser"' "$smoke_dir/version.json")"
 
       - name: Run browser worker and interactive desktop
         env:
-          VM_WORKER_ID: ${{ inputs.vm_id || format('github-{0}', github.run_id) }}
-          VM_ID: ${{ inputs.vm_id || '' }}
-          VM_SPEC_PATH: ${{ runner.temp }}/vm-spec.json
-          WORKER_MODE: ${{ steps.bootstrap.outputs.worker_mode || 'browser' }}
-          WORKER_SIZE: ${{ inputs.size || 'standard' }}
-          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ inputs.vm_id && format('{0}/vm-profile-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-profile', github.workspace) }}
-          BROWSER_WORKER_PROFILE_DIR: ${{ inputs.vm_id && format('{0}/vm-profile-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-profile', github.workspace) }}
-          BROWSER_WORKER_CHECKPOINT_DIR: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}', runner.temp, inputs.vm_id) || format('{0}/browser-worker-state/live-checkpoint', github.workspace) }}
-          BROWSER_WORKER_STATE_FILE: ${{ inputs.vm_id && format('{0}/vm-checkpoint-{1}/storage-state.json', runner.temp, inputs.vm_id) || 'browser-worker-state/storage-state.json' }}
-          BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ !inputs.vm_id && secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON || '' }}
+          UTILS_BROWSER_WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL }}
+          UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
+          BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON: ${{ secrets.BROWSER_WORKER_INITIAL_STORAGE_STATE_JSON }}
+          BROWSER_WORKER_STATE_FILE: browser-worker-state/storage-state.json
           PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
+          PLAYWRIGHT_MCP_USER_DATA_DIR: ${{ github.workspace }}/browser-worker-state/live-profile
+          BROWSER_WORKER_CHECKPOINT_DIR: ${{ github.workspace }}/browser-worker-state/live-checkpoint
           BROWSER_WORKER_CHECKPOINT_SECONDS: "60"
           BROWSER_WORKER_CHECKPOINT_UPLOAD_SECONDS: "900"
           PLAYWRIGHT_MCP_CDP_ENDPOINT: http://127.0.0.1:9222
-          VM_CHROMIUM_STARTUP_TIMEOUT_MS: "300000"
-          PLAYWRIGHT_MCP_CDP_TIMEOUT: "300000"
-          GITHUB_TOKEN: ${{ !inputs.vm_id && github.token || '' }}
-          GH_TOKEN: ${{ !inputs.vm_id && github.token || '' }}
+          PLAYWRIGHT_MCP_CDP_TIMEOUT: "120000"
+          WORKER_MAX_SECONDS: "19800"
+          WORKER_RENEWAL_LEAD_SECONDS: "900"
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          VM_WORKER_ID: github-${{ github.run_id }}
           VM_CHROMIUM_DEBUG_PORT: "9222"
           DISPLAY: ":99"
         run: |
-          test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Utils browser worker URL is missing" && exit 1)
-          test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Utils per-instance worker token is missing" && exit 1)
-          if [ -z "$VM_ID" ]; then
-            test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
-          fi
-          if [ "$WORKER_MODE" = "browser" ]; then
-            test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
-          fi
-          echo "Connecting interactive VM to ${UTILS_BROWSER_WORKER_URL%/browser-worker}"
+          test -n "$UTILS_BROWSER_WORKER_URL" || (echo "::error::Set UTILS_BROWSER_WORKER_URL in repository secrets" && exit 1)
+          test -n "$UTILS_BROWSER_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
+          test -n "$GITHUB_TOKEN" || (echo "::error::GitHub Actions token is unavailable" && exit 1)
+          test -n "$CHROMIUM_BIN" || (echo "::error::Chromium executable was not found" && exit 1)
 
-          if [ "$WORKER_MODE" = "browser" ]; then
-            : > "$RUNNER_TEMP/interactive-vm.log"
-            echo "Starting VM supervisor with relay path $VM_WORKER_SOCKET_PATH"
-            bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
-            vm_pid=$!
-            if [ -z "$VM_ID" ]; then
-              node src/profile-checkpoint-runner.mjs &
-              checkpoint_pid=$!
-            else
-              # Managed VM profiles are published from a separate workflow after
-              # this untrusted runner exits; never expose a repository write token
-              # to arbitrary VM commands.
-              checkpoint_pid=""
+          bash src/vm-supervisor.sh > >(tee -a "$RUNNER_TEMP/interactive-vm.log") 2>&1 &
+          vm_pid=$!
+          node src/profile-checkpoint-runner.mjs &
+          checkpoint_pid=$!
+          trap 'kill "$vm_pid" "$checkpoint_pid" 2>/dev/null || true; wait "$vm_pid" "$checkpoint_pid" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 300); do
+            if grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+              echo "Interactive VM relay is connected"
+              break
             fi
-            trap 'kill "$vm_pid" ${checkpoint_pid:-} 2>/dev/null || true; wait "$vm_pid" ${checkpoint_pid:-} 2>/dev/null || true' EXIT
-          else
-            vm_pid=""
-            checkpoint_pid=""
-            trap 'true' EXIT
+            if ! kill -0 "$vm_pid" 2>/dev/null; then
+              echo "::error::Interactive VM supervisor exited during startup"
+              cat "$RUNNER_TEMP/interactive-vm.log"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          if ! grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
+            echo "::error::Interactive VM relay did not connect to utils within 5 minutes"
+            cat "$RUNNER_TEMP/interactive-vm.log"
+            exit 1
           fi
 
-          if [ "$WORKER_MODE" = "browser" ]; then
-            for attempt in $(seq 1 600); do
-              if grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"; then
-                echo "Interactive VM relay is connected"
-                break
-              fi
-              if ! kill -0 "$vm_pid" 2>/dev/null; then
-                echo "::error::Interactive VM supervisor exited during startup"
-                cat "$RUNNER_TEMP/interactive-vm.log"
-                exit 1
-              fi
-              sleep 1
-            done
-            grep -q "Interactive VM authenticated and connected to utils" "$RUNNER_TEMP/interactive-vm.log"
-          else
-            echo "Worker running in compute-only mode: no browser packages or desktop are started."
-          fi
-          if [ "$WORKER_MODE" = "browser" ]; then
-            node src/worker.js
-          else
-            node src/vm.js
-          fi
-
-      - name: Prepare encrypted VM browser profile artifact
-        id: vm_profile
-        if: ${{ always() && inputs.vm_id && steps.bootstrap.outputs.worker_mode == 'browser' && env.VM_LIFECYCLE_MODE == 'persistent' && env.VM_BROWSER_PERSISTENT_PROFILE == 'true' }}
-        env:
-          PROFILE_DIR: ${{ runner.temp }}/vm-profile-${{ inputs.vm_id }}
-          PROFILE_OUTPUT_DIR: ${{ runner.temp }}/vm-profile-artifact
-          PROFILE_KEY: ${{ env.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
-        run: |
-          set -euo pipefail
-          if [ ! -s "$PROFILE_DIR/Local State" ] || [ ! -s "$PROFILE_DIR/Default/Preferences" ]; then
-            echo "::warning::No complete Chromium profile is available to checkpoint."
-            echo "has_profile=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          test -n "$PROFILE_KEY" || { echo "::error::Browser profile encryption key is unavailable"; exit 1; }
-          stage="$RUNNER_TEMP/vm-profile-stage"
-          mkdir -p "$stage/browser-worker-profile" "$PROFILE_OUTPUT_DIR"
-          cp -a "$PROFILE_DIR/." "$stage/browser-worker-profile/"
-          rm -f "$stage/browser-worker-profile/SingletonLock" "$stage/browser-worker-profile/SingletonCookie" "$stage/browser-worker-profile/SingletonSocket" "$stage/browser-worker-profile/DevToolsActivePort"
-          rm -rf "$stage/browser-worker-profile/Default/Cache" "$stage/browser-worker-profile/Default/Code Cache" "$stage/browser-worker-profile/Default/GPUCache" "$stage/browser-worker-profile/Crashpad" "$stage/browser-worker-profile/Crash Reports"
-          find "$stage/browser-worker-profile" -maxdepth 1 -type f -name '.org.chromium.*' -delete
-          tar -czf "$PROFILE_OUTPUT_DIR/profile.tar.gz" -C "$stage" browser-worker-profile
-          node --input-type=module <<'NODE'
-          import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
-          import { createReadStream, createWriteStream } from "node:fs";
-          import { appendFile, writeFile } from "node:fs/promises";
-          import { pipeline } from "node:stream/promises";
-          const secret = process.env.PROFILE_KEY;
-          if (typeof secret !== "string" || Buffer.byteLength(secret) < 32) throw new Error("Profile encryption key must be at least 32 bytes");
-          const key = Buffer.from(hkdfSync("sha256", Buffer.from(secret), Buffer.from("utils-browser-worker-profile-v1"), Buffer.from("github-actions-artifact-encryption"), 32));
-          const iv = randomBytes(12);
-          const cipher = createCipheriv("aes-256-gcm", key, iv);
-          const input = process.env.PROFILE_OUTPUT_DIR + "/profile.tar.gz";
-          const output = process.env.PROFILE_OUTPUT_DIR + "/browser-worker-profile.tar.gz.enc";
-          const header = JSON.stringify({version:1, algorithm:"aes-256-gcm", iv:iv.toString("base64")}) + "\n";
-          await writeFile(output, header, {mode:0o600});
-          await pipeline(createReadStream(input), cipher, createWriteStream(output, {flags:"a", mode:0o600}));
-          await appendFile(output, cipher.getAuthTag());
-          NODE
-          rm -f "$PROFILE_OUTPUT_DIR/profile.tar.gz"
-          rm -rf "$stage"
-          echo "has_profile=true" >> "$GITHUB_OUTPUT"
-
-      - name: Upload encrypted VM browser profile artifact
-        if: ${{ always() && steps.vm_profile.outputs.has_profile == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: vm-profile-${{ inputs.vm_id }}
-          path: ${{ runner.temp }}/vm-profile-artifact/browser-worker-profile.tar.gz.enc
-          retention-days: 1
-          if-no-files-found: ignore
+          node src/worker.js
 
       - name: Prepare and encrypt browser profile artifacts
-        if: ${{ always() && steps.bootstrap.outputs.worker_mode == 'browser' && !inputs.vm_id }}
+        if: ${{ always() }}
         env:
           UTILS_BROWSER_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-
+          BROWSER_WORKER_PROFILE_ENCRYPTION_KEY: ${{ secrets.BROWSER_WORKER_PROFILE_ENCRYPTION_KEY }}
         run: |
           profile_dir="$BROWSER_WORKER_PROFILE_DIR"
           profile_ready=true
@@ -902,7 +374,7 @@ jobs:
           if [ "$profile_ready" != "true" ]; then exit 1; fi
 
       - name: Upload browser profile
-        if: ${{ always() && !inputs.vm_id && hashFiles('browser-worker-profile.tar.gz.enc') != '' }}
+        if: ${{ always() && hashFiles('browser-worker-profile.tar.gz.enc') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: browser-worker-profile
@@ -911,7 +383,7 @@ jobs:
           overwrite: true
 
       - name: Upload latest encrypted checkpoint archive
-        if: ${{ always() && !inputs.vm_id && hashFiles('browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz.enc') != '' }}
+        if: ${{ always() && hashFiles('browser-worker-state/live-checkpoint/browser-worker-profile.tar.gz.enc') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: browser-worker-profile-checkpoint
@@ -920,7 +392,7 @@ jobs:
           overwrite: true
 
       - name: Upload encrypted browser storage state
-        if: ${{ always() && !inputs.vm_id && hashFiles('browser-worker-state/storage-state.json.enc') != '' }}
+        if: ${{ always() && hashFiles('browser-worker-state/storage-state.json.enc') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: browser-worker-state

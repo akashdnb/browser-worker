@@ -2,17 +2,7 @@ import { getCdpJson, getCdpResponse } from "./cdp-http.mjs";
 const cdpEndpoint = process.env.PLAYWRIGHT_MCP_CDP_ENDPOINT ?? "http://127.0.0.1:9222";
 const maxTabs = Number.parseInt(process.env.CHROME_MAX_TABS ?? "15", 10);
 const intervalMs = Number.parseInt(process.env.CHROME_TAB_GUARD_INTERVAL_MS ?? "5000", 10);
-const browserStartupTimeoutMs = Number.parseInt(
-  process.env.VM_CHROMIUM_STARTUP_TIMEOUT_MS ?? process.env.PLAYWRIGHT_MCP_CDP_TIMEOUT ?? "120000",
-  10,
-);
-const defaultStartupGraceMs = Number.isFinite(browserStartupTimeoutMs)
-  ? Math.max(120_000, browserStartupTimeoutMs)
-  : 120_000;
-const startupGraceMs = Number.parseInt(
-  process.env.CHROME_TAB_GUARD_STARTUP_GRACE_MS ?? String(defaultStartupGraceMs),
-  10,
-);
+const startupGraceMs = Number.parseInt(process.env.CHROME_TAB_GUARD_STARTUP_GRACE_MS ?? "30000", 10);
 
 if (!Number.isInteger(maxTabs) || maxTabs < 1 || maxTabs > 100) {
   throw new Error("CHROME_MAX_TABS must be between 1 and 100");

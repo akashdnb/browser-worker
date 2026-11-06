@@ -16,7 +16,7 @@ Disposable Chromium worker for the private `akashdnb/utils` Browser MCP gateway.
 
 Add these GitHub Actions repository secrets:
 
-- `UTILS_BROWSER_WORKER_URL`: `wss://utils-zkiy.onrender.com/browser-worker`
+- `UTILS_BROWSER_WORKER_URL`: `wss://utils-l1pw.onrender.com/browser-worker`
 - `UTILS_BROWSER_WORKER_TOKEN`: same value as the `RENDER_MCP_BROWSER_WORKER_TOKEN` environment variable on the `utils` Render service.
 
 Dispatch **Browser Worker** from the Actions tab to start a worker when none is active. Use **Restart Browser Worker** for an intentional manual restart; it archives the active profile first. If multiple workers overlap, it refuses to guess which profile is current. GitHub schedules can be delayed; an overlapping safety-net run is skipped rather than replacing the active session.
