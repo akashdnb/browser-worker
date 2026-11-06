@@ -2,6 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+test("legacy startup verifies its Utils token before launching the browser", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  const preflight = workflow.indexOf("Verify authenticated legacy worker endpoint");
+  const browserStart = workflow.indexOf("Run browser worker and interactive desktop");
+  assert.ok(preflight >= 0 && preflight < browserStart);
+  const section = workflow.slice(preflight, browserStart);
+  assert.match(section, /WORKER_TOKEN: \$\{\{ secrets\.UTILS_BROWSER_WORKER_TOKEN \}\}/);
+  assert.match(section, /\/vm\/worker-health/);
+  assert.match(section, /Authorization: Bearer \$WORKER_TOKEN/);
+  assert.match(section, /health_code.*401/);
+  assert.match(section, /health_code.*200/);
+});
+
 test("legacy browser worker has a frequent recovery trigger", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   assert.match(workflow, /schedule:\s*\n\s+- cron: "\*\/10 \* \* \* \*"/);
