@@ -16,7 +16,7 @@ async def _send_json(websocket, payload: dict) -> None:
     await websocket.send(json.dumps(payload))
 
 
-async def _execute(websocket, message: dict) -> None:
+async def _execute(websocket, message: dict, active_processes: dict) -> None:
     request_id = str(message.get("request_id") or "")
     command = str(message.get("command") or "")
     timeout_seconds = max(1, min(int(message.get("timeout_seconds") or 300), 3600))
@@ -32,6 +32,8 @@ async def _execute(websocket, message: dict) -> None:
             env=env,
             start_new_session=True,
         )
+
+        active_processes[request_id] = process
 
         async def pump(reader, stream: str) -> None:
             while True:
@@ -64,6 +66,8 @@ async def _execute(websocket, message: dict) -> None:
             "data": f"Worker execution error: {exc}\n",
         })
         exit_code = 127
+    finally:
+        active_processes.pop(request_id, None)
     await _send_json(websocket, {
         "type": "worker.result",
         "request_id": request_id,
@@ -80,10 +84,17 @@ async def _connect_once(socket_url: str, worker_id: str, token: str) -> None:
         if response.get("type") != "worker.auth.ok":
             raise RuntimeError("Utils rejected the worker connection")
         print(f"Worker {worker_id} connected to Utils", flush=True)
+        active_processes: dict[str, asyncio.subprocess.Process] = {}
         while True:
             message = json.loads(await websocket.recv())
             if message.get("type") == "worker.exec":
-                asyncio.create_task(_execute(websocket, message))
+                asyncio.create_task(_execute(websocket, message, active_processes))
+            elif message.get("type") == "worker.cancel":
+                request_id = str(message.get("request_id") or "")
+                process = active_processes.get(request_id)
+                if process is not None and process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, 2)
 
 
 async def run() -> None:
