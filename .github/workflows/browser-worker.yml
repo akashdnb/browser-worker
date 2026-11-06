@@ -71,7 +71,7 @@ jobs:
           VM_ID: ${{ inputs.vm_id || '' }}
           EVENT_NAME: ${{ github.event_name }}
           WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
-          WORKER_URL: ${{ secrets.UTILS_BROWSER_WORKER_URL || 'https://utils-zkiy.onrender.com/browser-worker' }}
+          WORKER_URL: https://utils-zkiy.onrender.com/browser-worker
         run: |
           if [ -n "$VM_ID" ]; then
             echo "Independent Utils VM worker $VM_ID; skipping legacy singleton guard"
