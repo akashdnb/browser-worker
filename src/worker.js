@@ -233,6 +233,7 @@ async function probeCdp() {
     const response = await fetch(`${cdpEndpoint.replace(/\/$/, "")}/json/version`, {
       signal: AbortSignal.timeout(1500),
     });
+    await response.arrayBuffer();
     return response.ok
       ? { healthy: true }
       : { healthy: false, reason: `CDP returned HTTP ${response.status}` };
