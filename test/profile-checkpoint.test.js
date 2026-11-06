@@ -45,11 +45,12 @@ test("desktop environment clears invalid inherited DBus addresses", () => {
     PATH: "/usr/bin",
     DBUS_SESSION_BUS_ADDRESS: "autolaunch:",
     DBUS_SYSTEM_BUS_ADDRESS: "invalid",
+    DBUS_STARTER_ADDRESS: "autolaunch:",
+    DBUS_STARTER_BUS_TYPE: "session",
   }, ":99");
   assert.equal(env.DISPLAY, ":99");
   assert.equal(env.PATH, "/usr/bin");
-  assert.equal("DBUS_SESSION_BUS_ADDRESS" in env, false);
-  assert.equal("DBUS_SYSTEM_BUS_ADDRESS" in env, false);
+  assert.equal(Object.keys(env).some((key) => key.startsWith("DBUS_")), false);
 });
 
 test("profile readiness rejects missing/empty Chromium metadata", async () => {
