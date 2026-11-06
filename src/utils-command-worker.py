@@ -11,10 +11,12 @@ from websockets.asyncio.client import connect
 
 MAX_CHUNK = 16_384
 SETUP_REQUEST_ID = "environment-setup"
+_SEND_LOCK = asyncio.Lock()
 
 
 async def _send_json(websocket, payload: dict) -> None:
-    await websocket.send(json.dumps(payload))
+    async with _SEND_LOCK:
+        await websocket.send(json.dumps(payload))
 
 
 async def _status(
@@ -224,19 +226,46 @@ async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
                 timeout=task.get("timeout", 600),
             )
 
-        # Independent package managers/custom tasks can run concurrently.
-        # APT index refresh + install is kept serial to avoid dpkg lock races.
-        pending = [task for task in tasks if "command" in task]
-        results = await asyncio.gather(*(run_task(task) for task in pending), return_exceptions=True)
-        for task, result in zip(pending, results):
-            if isinstance(result, BaseException):
-                tasks.append({
-                    "id": task["id"], "name": task["name"], "status": "failed",
-                    "message": f"{type(result).__name__}: {result}",
-                })
+        # Run independent package managers concurrently, but keep APT as a
+        # single serialized transaction and preserve dependency ordering.
+        results_by_id: dict[str, dict] = {}
+        package_tasks = [task for task in tasks if task["id"] in {"pip-install", "npm-install"}]
+        package_results = await asyncio.gather(
+            *(run_task(task) for task in package_tasks), return_exceptions=True
+        )
+        for task, result in zip(package_tasks, package_results):
+            results_by_id[task["id"]] = result if isinstance(result, dict) else {
+                "id": task["id"], "name": task["name"], "status": "failed",
+                "message": f"{type(result).__name__}: {result}",
+            }
 
-        failed = [task for task in tasks if task.get("status") in {"failed", "skipped"}]
-        completed = [task for task in tasks if task.get("status") == "completed"]
+        playwright_task = next((task for task in tasks if task["id"] == "playwright-chromium"), None)
+        if playwright_task:
+            pip_result = results_by_id.get("pip-install", {"status": "completed"})
+            if pip_result.get("status") == "completed":
+                results_by_id["playwright-chromium"] = await run_task(playwright_task)
+            else:
+                results_by_id["playwright-chromium"] = {
+                    "id": "playwright-chromium", "name": "Playwright Chromium",
+                    "status": "skipped", "message": "Skipped because Playwright Python package installation failed",
+                }
+                await _status(
+                    websocket, "preparing", "Playwright Chromium: skipped because pip installation failed",
+                    task_id="playwright-chromium", task_name="Playwright Chromium",
+                    task_status="skipped",
+                )
+
+        # Custom commands run after package installation, in declared order;
+        # users often use them to configure or validate installed packages.
+        for task in [item for item in tasks if item["id"].startswith("custom-")]:
+            results_by_id[task["id"]] = await run_task(task)
+
+        results = [*tasks]
+        # Replace task definitions with their execution results.
+        final_tasks = [item for item in results if "command" not in item]
+        final_tasks.extend(results_by_id.values())
+        failed = [task for task in final_tasks if task.get("status") in {"failed", "skipped"}]
+        completed = [task for task in final_tasks if task.get("status") == "completed"]
         if failed:
             overall = "partially_ready" if completed else "failed"
             summary = f"Environment setup finished: {len(completed)} completed, {len(failed)} failed or skipped"
