@@ -145,6 +145,7 @@ async function waitForPersistentProfile(timeoutMs = 15_000) {
 }
 
 async function cleanProfileLocks() {
+  console.log(`Scanning Chromium profile for stale atomic-write files at ${userDataDir}`);
   const removedAtomicWriteFiles = await removeChromiumAtomicWriteFiles(userDataDir);
   await Promise.all([
     rm(`${userDataDir}/SingletonLock`, { force: true }),
