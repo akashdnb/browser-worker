@@ -13,9 +13,10 @@ test("legacy recovery guard trusts authenticated Utils liveness, not stale Actio
   assert.match(workflow, /Authorization: Bearer \$WORKER_TOKEN/);
   assert.match(workflow, /worker_connected" = "true"/);
   assert.match(workflow, /Utils reports no connected legacy worker/);
-  assert.match(workflow, /age_seconds.*-lt 900/);
+  assert.match(workflow, /age_seconds.*-lt 1800/);
   assert.match(workflow, /actions\/runs\/\$active_run_id\/cancel/);
   assert.match(workflow, /source_run_id=\$active_run_id/);
+  assert.match(workflow, /\.run_started_at/);
 });
 
 test("fleet VM guards do not serialize behind the legacy worker guard", async () => {
@@ -25,8 +26,9 @@ test("fleet VM guards do not serialize behind the legacy worker guard", async ()
 
 test("stale queued legacy runs do not block recovery", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /Ignoring stale queued legacy Browser Worker run/);
+  assert.match(workflow, /Cancelling stale queued legacy Browser Worker run/);
   assert.match(workflow, /age_seconds.*-gt 600/);
+  assert.match(workflow, /actions\/runs\/\$candidate\/cancel/);
   assert.doesNotMatch(workflow, /gh run cancel "\$candidate"/);
 });
 
@@ -86,5 +88,5 @@ test("push handoff bypasses health probing so a deployment can recover a dead wo
 
 test("stale queued-run notices do not become false-positive queued run IDs", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /Ignoring stale queued legacy Browser Worker run \$candidate[^\n]*>&2/);
+  assert.match(workflow, /Cancelling stale queued legacy Browser Worker run \$candidate[^\n]*>&2/);
 });
