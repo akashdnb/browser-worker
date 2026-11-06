@@ -8,4 +8,7 @@ test("VM supervisor preloads the BrowserMCP extension before starting the relay"
   assert.match(supervisor, /node --import \.\/src\/vm-heartbeat-hook\.mjs src\/vm\.js/);
   assert.match(supervisor, /backoff/);
   assert.match(supervisor, /BrowserMCP VM extension bootstrap runs as a Node preload/);
+  assert.match(supervisor, /pkill -TERM -x openbox/);
+  assert.match(supervisor, /pgrep -x openbox/);
+  assert.match(supervisor, /pkill -KILL -x openbox/);
 });
