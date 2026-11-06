@@ -22,10 +22,14 @@ cleanup_display() {
   # so a failed startup cannot leave an X server or desktop helper behind.
   pkill -TERM -f "Xvfb.*${display}" 2>/dev/null || true
   pkill -TERM -f "x11vnc.*${display}" 2>/dev/null || true
-  pkill -TERM -f "openbox.*${display}" 2>/dev/null || true
+  # openbox does not include DISPLAY in its argv, so match its exact process
+  # name rather than the display-specific command-line pattern above.
+  pkill -TERM -x openbox 2>/dev/null || true
 
   for _ in $(seq 1 20); do
-    if ! pgrep -af "Xvfb.*${display}" >/dev/null 2>&1; then
+    if ! pgrep -af "Xvfb.*${display}" >/dev/null 2>&1 &&
+       ! pgrep -af "x11vnc.*${display}" >/dev/null 2>&1 &&
+       ! pgrep -x openbox >/dev/null 2>&1; then
       break
     fi
     sleep 0.25
@@ -33,6 +37,12 @@ cleanup_display() {
 
   if pgrep -af "Xvfb.*${display}" >/dev/null 2>&1; then
     pkill -KILL -f "Xvfb.*${display}" 2>/dev/null || true
+  fi
+  if pgrep -af "x11vnc.*${display}" >/dev/null 2>&1; then
+    pkill -KILL -f "x11vnc.*${display}" 2>/dev/null || true
+  fi
+  if pgrep -x openbox >/dev/null 2>&1; then
+    pkill -KILL -x openbox 2>/dev/null || true
   fi
 
   # Only remove the display lock/socket after no Xvfb owns the display.
