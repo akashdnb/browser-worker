@@ -24,3 +24,15 @@ Dispatch **Browser Worker** from the Actions tab to start a worker when none is 
 ## Security notes
 
 This is a first usable version, not a multi-tenant browser service. The relay authenticates the worker with a shared secret and binds the connection to the private gateway. Never expose the local Playwright MCP port publicly or place the shared secret in repository files/logs. The public repo intentionally contains no credentials.
+
+## Utils command workers
+
+The separate **Utils Command Worker** workflow starts a disposable GitHub-hosted Ubuntu runner for shell commands. It does not start Chromium and does not change the Browser Worker workflow or its saved browser profile.
+
+Add this repository secret:
+
+- `UTILS_GITHUB_WORKER_TOKEN`: same value as `RENDER_MCP_GITHUB_WORKER_TOKEN` on the Utils server. Keep this separate from `UTILS_BROWSER_WORKER_TOKEN`.
+
+Utils dispatches the workflow with a worker ID, display name, and server URL. The runner checks out this public repository, starts `src/utils-command-worker.py`, and opens an authenticated outbound WebSocket to Utils. Commands are sent over that socket; stdout/stderr and exit status are relayed back to the Utils dashboard and MCP. The job is capped at 350 minutes. Stopping a worker cancels its Actions run.
+
+The runner's checkout credential is scoped to this public repository. No private Utils repository token is injected into arbitrary shell commands. If commands need access to a private repository, add a separately scoped credential in a future explicit configuration rather than reusing the worker bootstrap token.

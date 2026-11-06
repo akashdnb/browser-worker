@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import time
+import json
+from urllib.parse import urlsplit
+
+from websockets.asyncio.client import connect
+
+MAX_CHUNK = 16_384
+
+
+async def _send_json(websocket, payload: dict) -> None:
+    await websocket.send(json.dumps(payload))
+
+
+async def _execute(websocket, message: dict) -> None:
+    request_id = str(message.get("request_id") or "")
+    command = str(message.get("command") or "")
+    timeout_seconds = max(1, min(int(message.get("timeout_seconds") or 300), 3600))
+    started = time.monotonic()
+    timed_out = False
+    env = os.environ.copy()
+    env.pop("UTILS_WORKER_TOKEN", None)
+    try:
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+
+        async def pump(reader, stream: str) -> None:
+            while True:
+                chunk = await reader.read(MAX_CHUNK)
+                if not chunk:
+                    return
+                await _send_json(websocket, {
+                    "type": "worker.output",
+                    "request_id": request_id,
+                    "stream": stream,
+                    "data": chunk.decode("utf-8", errors="replace"),
+                })
+
+        stdout_task = asyncio.create_task(pump(process.stdout, "stdout"))
+        stderr_task = asyncio.create_task(pump(process.stderr, "stderr"))
+        try:
+            await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+        except TimeoutError:
+            timed_out = True
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, 9)
+            await process.wait()
+        await asyncio.gather(stdout_task, stderr_task)
+        exit_code = process.returncode
+    except Exception as exc:
+        await _send_json(websocket, {
+            "type": "worker.output",
+            "request_id": request_id,
+            "stream": "stderr",
+            "data": f"Worker execution error: {exc}\n",
+        })
+        exit_code = 127
+    await _send_json(websocket, {
+        "type": "worker.result",
+        "request_id": request_id,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "duration_seconds": round(time.monotonic() - started, 3),
+    })
+
+
+async def _connect_once(socket_url: str, worker_id: str, token: str) -> None:
+    async with connect(socket_url, ping_interval=25, ping_timeout=25, max_size=2**20) as websocket:
+        await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token})
+        response = json.loads(await websocket.recv())
+        if response.get("type") != "worker.auth.ok":
+            raise RuntimeError("Utils rejected the worker connection")
+        print(f"Worker {worker_id} connected to Utils", flush=True)
+        while True:
+            message = json.loads(await websocket.recv())
+            if message.get("type") == "worker.exec":
+                asyncio.create_task(_execute(websocket, message))
+
+
+async def run() -> None:
+    worker_id = os.environ.get("UTILS_WORKER_ID", "").strip()
+    server_url = os.environ.get("UTILS_WORKER_SERVER_URL", "").strip()
+    token = os.environ.get("UTILS_WORKER_TOKEN", "")
+    if not worker_id or not token or not server_url:
+        raise RuntimeError("UTILS_WORKER_ID, UTILS_WORKER_SERVER_URL and UTILS_WORKER_TOKEN are required")
+    parsed = urlsplit(server_url)
+    if parsed.scheme not in {"https", "http"} or not parsed.netloc:
+        raise RuntimeError("UTILS_WORKER_SERVER_URL must be an HTTP(S) origin")
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    socket_url = f"{scheme}://{parsed.netloc}/github-workers/agent"
+    delay = 2
+    while True:
+        try:
+            await _connect_once(socket_url, worker_id, token)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"Worker connection interrupted ({type(exc).__name__}); reconnecting in {delay}s", flush=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+        else:
+            delay = 2
+
+
+def main() -> None:
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()
