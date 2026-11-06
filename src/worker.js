@@ -50,6 +50,7 @@ if (!Number.isFinite(cdpRecoveryStartupDeadlineMs) || cdpRecoveryStartupDeadline
 const workerId = process.env.VM_ID || process.env.VM_WORKER_ID || randomUUID();
 let shuttingDown = false;
 let reconnectTimer;
+let gatewayReconnectAttempt = 0;
 let renewalTimer;
 let renewalRetryTimer;
 let renewalTriggered = false;
@@ -451,6 +452,7 @@ function connectGateway() {
 
   gateway.on("open", () => {
     gatewayPongAt = Date.now();
+    gatewayReconnectAttempt = 0;
     startGatewayKeepalive();
     gateway.send(JSON.stringify({ type: "worker.hello", workerId, token: workerToken, version: "0.2.0" }));
     console.log(`Gateway WebSocket opened; authenticating worker ${workerId}`);
@@ -537,7 +539,12 @@ function connectGateway() {
       void shutdown();
       return;
     }
-    if (!shuttingDown) reconnectTimer = setTimeout(connectGateway, 1500);
+    if (!shuttingDown) {
+      const delayMs = Math.min(30_000, 1000 * (2 ** gatewayReconnectAttempt));
+      gatewayReconnectAttempt += 1;
+      console.warn(`Reconnecting Browser MCP gateway in ${delayMs}ms`);
+      reconnectTimer = setTimeout(connectGateway, delayMs);
+    }
   });
 
   gateway.on("error", (error) => console.error("Gateway WebSocket error:", error.message));
