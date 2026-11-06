@@ -129,3 +129,18 @@ test("legacy worker prefers the runner-provided Chrome and falls back to Playwri
   assert.match(resolve, /command -v google-chrome/);
   assert.match(resolve, /CHROMIUM_BIN=\$chromium_bin/);
 });
+
+
+test("legacy worker prefers open-source Chromium before Google Chrome", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  const install = workflow.slice(
+    workflow.indexOf("Install Chromium and OS dependencies"),
+    workflow.indexOf("Run VM setup scripts"),
+  );
+  const resolve = workflow.slice(
+    workflow.indexOf("Resolve Chromium executable"),
+    workflow.indexOf("Run browser worker and interactive desktop"),
+  );
+  assert.match(install, /command -v chromium[^\n]*\|\| command -v google-chrome/);
+  assert.match(resolve, /command -v chromium \|\| command -v google-chrome/);
+});
