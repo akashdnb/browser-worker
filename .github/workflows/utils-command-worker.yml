@@ -46,8 +46,8 @@ jobs:
           UTILS_WORKER_ID: ${{ inputs.worker_id }}
           UTILS_WORKER_NAME: ${{ inputs.worker_name }}
           UTILS_WORKER_SERVER_URL: ${{ inputs.server_url }}
-          UTILS_WORKER_TOKEN: ${{ secrets.UTILS_GITHUB_WORKER_TOKEN }}
+          UTILS_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
         run: |
-          test -n "$UTILS_WORKER_TOKEN" || (echo "::error::Set UTILS_GITHUB_WORKER_TOKEN in repository secrets" && exit 1)
+          test -n "$UTILS_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
           python -m pip install --disable-pip-version-check "websockets>=14.2,<16"
           python src/utils-command-worker.py

@@ -31,7 +31,7 @@ The separate **Utils Command Worker** workflow starts a disposable GitHub-hosted
 
 Add this repository secret:
 
-- `UTILS_GITHUB_WORKER_TOKEN`: same value as `RENDER_MCP_GITHUB_WORKER_TOKEN` on the Utils server. Keep this separate from `UTILS_BROWSER_WORKER_TOKEN`.
+- `UTILS_BROWSER_WORKER_TOKEN`: reuse the same value already used by the Browser Worker workflow and configured as `RENDER_MCP_BROWSER_WORKER_TOKEN` on the Utils server.
 
 Utils dispatches the workflow with a worker ID, display name, and server URL. The runner checks out this public repository, starts `src/utils-command-worker.py`, and opens an authenticated outbound WebSocket to Utils. Commands are sent over that socket; stdout/stderr and exit status are relayed back to the Utils dashboard and MCP. The job is capped at 350 minutes. Stopping a worker cancels its Actions run.
 
