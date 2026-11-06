@@ -7,10 +7,15 @@ test("legacy browser worker has a frequent recovery trigger", async () => {
   assert.match(workflow, /schedule:\s*\n\s+- cron: "\*\/10 \* \* \* \*"/);
 });
 
-test("legacy recovery guard skips cleanly when a worker is already active", async () => {
+test("legacy recovery guard trusts authenticated Utils liveness, not stale Actions run state", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
-  assert.match(workflow, /Legacy Browser Worker is already active or queued/);
-  assert.doesNotMatch(workflow, /::error::Refusing to start while another Browser Worker run is active/);
+  assert.match(workflow, /\/vm\/worker-health/);
+  assert.match(workflow, /Authorization: Bearer \$WORKER_TOKEN/);
+  assert.match(workflow, /worker_connected" = "true"/);
+  assert.match(workflow, /Utils reports no connected legacy worker/);
+  assert.match(workflow, /age_seconds.*-lt 900/);
+  assert.match(workflow, /actions\/runs\/\$active_run_id\/cancel/);
+  assert.match(workflow, /source_run_id=\$active_run_id/);
 });
 
 test("fleet VM guards do not serialize behind the legacy worker guard", async () => {
@@ -62,4 +67,12 @@ test("legacy guard uses the GitHub REST run title and path fields", async () => 
   assert.match(workflow, /gh api "repos\/\$REPO\/actions\/runs\?status=\$run_state&per_page=100"/);
   assert.match(workflow, /\.path == "\.github\/workflows\/browser-worker\.yml"/);
   assert.match(workflow, /\.display_title/);
+});
+
+
+test("scheduled recovery restores the cancelled worker's final profile", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  assert.match(workflow, /source_run_id: \$\{\{ steps\.check\.outputs\.source_run_id \}\}/);
+  assert.match(workflow, /inputs\.source_run_id \|\| needs\.guard\.outputs\.source_run_id/);
+  assert.match(workflow, /timeout-minutes: 2/);
 });
