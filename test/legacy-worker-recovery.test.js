@@ -69,12 +69,15 @@ test("push handoff can replace an orphaned legacy run without waiting on its con
   assert.ok(workflow.indexOf("Stop older worker runs after a push deployment") < workflow.indexOf("Set up Node.js"));
 });
 
-test("legacy browser startup cleans stale Chromium temp files and waits for the full startup window", async () => {
+test("legacy browser startup cleans nested Chromium temp files and waits for the full startup window", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   const vm = await readFile(new URL("../src/vm.js", import.meta.url), "utf8");
+  const cleanup = await readFile(new URL("../src/chromium-profile-cleanup.mjs", import.meta.url), "utf8");
   assert.ok(workflow.includes("for attempt in $(seq 1 600); do"));
   assert.ok(workflow.includes("find \"$stage/browser-worker-profile\" -maxdepth 1 -type f -name '.org.chromium.*' -delete"));
-  assert.ok(vm.includes('name.startsWith(".org.chromium.")'));
+  assert.ok(vm.includes("removeChromiumAtomicWriteFiles(userDataDir)"));
+  assert.ok(vm.includes("desktopProcessEnvironment(process.env, display)"));
+  assert.ok(cleanup.includes('entry.name.startsWith(".org.chromium.")'));
 });
 
 test("legacy guard uses the GitHub REST run title and path fields", async () => {
