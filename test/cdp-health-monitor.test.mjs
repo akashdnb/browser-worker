@@ -16,7 +16,11 @@ async function listen(server, port = 0) {
 
 async function close(server) {
   if (!server?.listening) return;
-  await new Promise((resolve) => server.close(resolve));
+  const closed = new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  server.closeAllConnections?.();
+  await closed;
 }
 
 async function waitFor(predicate, timeoutMs = 1500) {
@@ -28,7 +32,7 @@ async function waitFor(predicate, timeoutMs = 1500) {
   throw new Error("Timed out waiting for expected worker state");
 }
 
-test("marks an open worker socket unready when Chromium exits, then readies it after CDP returns", async () => {
+test("marks an open worker socket unready when Chromium exits, then readies it after CDP returns", { timeout: 5000 }, async () => {
   const createCdpServer = () => createServer((request, response) => {
     if (request.url === "/json/version") {
       response.writeHead(200, { "content-type": "application/json" });
@@ -112,7 +116,7 @@ test("marks an open worker socket unready when Chromium exits, then readies it a
   }
 });
 
-test("uses capped exponential backoff when the browser backend misses its startup deadline", async () => {
+test("uses capped exponential backoff when the browser backend misses its startup deadline", { timeout: 2000 }, async () => {
   const delays = [];
   let monitor;
   monitor = new CdpHealthMonitor({
@@ -136,7 +140,7 @@ test("uses capped exponential backoff when the browser backend misses its startu
   assert.equal(monitor.isReady, false);
 });
 
-test("worker runtime gates MCP requests and reports CDP readiness over the existing gateway socket", async () => {
+test("worker runtime gates MCP requests and reports CDP readiness over the existing gateway socket", { timeout: 2000 }, async () => {
   const worker = await readFile(new URL("../src/worker.js", import.meta.url), "utf8");
   assert.match(worker, /new CdpHealthMonitor\(/);
   assert.match(worker, /type: "worker\.not_ready"/);
