@@ -133,7 +133,11 @@ async function probeCdp(timeoutMs = cdpStartupTimeoutMs, browserProcess = null) 
   }
   const diagnostic = `Chromium CDP did not become ready on 127.0.0.1:${cdpPort} after ${timeoutMs}ms: ${lastError}`;
   console.error(diagnostic);
-  await reportStartup(diagnostic);
+  const snapshot = await runCommand(
+    "ps -eo pid,ppid,stat,comm,args | grep -E '[c]hrome|[c]hromium|[x]11vnc|[X]vfb' | tail -n 15; printf '\\nListening ports:\\n'; ss -ltnp | grep -E ':9222|:5900' || true",
+    5,
+  );
+  await reportStartup(`${diagnostic}; process snapshot: ${(snapshot.output || snapshot.error || "unavailable").replace(/\s+/g, " ").slice(-2400)}`);
   return false;
 }
 
