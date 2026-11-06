@@ -377,7 +377,12 @@ jobs:
         if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
         env:
           VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
-        run: timeout "$VM_STARTUP_TIMEOUT_SECONDS" npx playwright install --with-deps chromium
+        run: |
+          if command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
+            echo "Using runner-provided browser: $(command -v google-chrome || command -v chromium)"
+          else
+            timeout "$VM_STARTUP_TIMEOUT_SECONDS" npx playwright install --with-deps chromium
+          fi
 
       - name: Run VM setup scripts
         if: ${{ inputs.vm_id }}
@@ -662,6 +667,9 @@ jobs:
         if: ${{ inputs.worker_mode != 'compute' }}
         run: |
           chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
+          if [ -z "$chromium_bin" ]; then
+            chromium_bin="$(command -v google-chrome || command -v chromium || true)"
+          fi
           test -n "$chromium_bin"
           echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
           echo "Using shared interactive Chromium at $chromium_bin"
