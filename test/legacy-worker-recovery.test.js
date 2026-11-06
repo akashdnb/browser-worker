@@ -112,3 +112,20 @@ test("legacy stale-run age is measured from runner start time", async () => {
   assert.match(workflow, /date -d "\$active_started_at"/);
   assert.doesNotMatch(workflow, /date -d "\$active_created_at"/);
 });
+
+
+test("legacy worker prefers the runner-provided Chrome and falls back to Playwright Chromium", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  const install = workflow.slice(
+    workflow.indexOf("Install Chromium and OS dependencies"),
+    workflow.indexOf("Run VM setup scripts"),
+  );
+  const resolve = workflow.slice(
+    workflow.indexOf("Resolve Chromium executable"),
+    workflow.indexOf("Run browser worker and interactive desktop"),
+  );
+  assert.match(install, /command -v google-chrome/);
+  assert.match(install, /npx playwright install --with-deps chromium/);
+  assert.match(resolve, /command -v google-chrome/);
+  assert.match(resolve, /CHROMIUM_BIN=\$chromium_bin/);
+});
