@@ -22,6 +22,7 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
     timeout_seconds = max(1, min(int(message.get("timeout_seconds") or 300), 3600))
     started = time.monotonic()
     timed_out = False
+    interrupted = False
     env = os.environ.copy()
     env.pop("UTILS_WORKER_TOKEN", None)
     try:
@@ -58,6 +59,7 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
             await process.wait()
         await asyncio.gather(stdout_task, stderr_task)
         exit_code = process.returncode
+        interrupted = exit_code in (-2, 130)
     except Exception as exc:
         await _send_json(websocket, {
             "type": "worker.output",
@@ -73,6 +75,7 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
         "request_id": request_id,
         "exit_code": exit_code,
         "timed_out": timed_out,
+        "interrupted": interrupted,
         "duration_seconds": round(time.monotonic() - started, 3),
     })
 
@@ -95,6 +98,16 @@ async def _connect_once(socket_url: str, worker_id: str, token: str) -> None:
                 if process is not None and process.returncode is None:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(process.pid, 2)
+                    async def force_stop(proc: asyncio.subprocess.Process) -> None:
+                        await asyncio.sleep(5)
+                        if proc.returncode is None:
+                            with contextlib.suppress(ProcessLookupError):
+                                os.killpg(proc.pid, 15)
+                            await asyncio.sleep(2)
+                        if proc.returncode is None:
+                            with contextlib.suppress(ProcessLookupError):
+                                os.killpg(proc.pid, 9)
+                    asyncio.create_task(force_stop(process))
 
 
 async def run() -> None:
