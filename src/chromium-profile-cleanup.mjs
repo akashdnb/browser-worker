@@ -34,7 +34,11 @@ export async function removeChromiumAtomicWriteFiles(profileDir) {
     }
   }
 
-  await Promise.all(staleFiles.map((filePath) => rm(filePath, { recursive: true, force: true })));
+  const removalBatchSize = 64;
+  for (let index = 0; index < staleFiles.length; index += removalBatchSize) {
+    const batch = staleFiles.slice(index, index + removalBatchSize);
+    await Promise.all(batch.map((filePath) => rm(filePath, { recursive: true, force: true })));
+  }
   return staleFiles.length;
 }
 
