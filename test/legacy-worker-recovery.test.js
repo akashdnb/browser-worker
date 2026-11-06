@@ -90,3 +90,9 @@ test("stale queued-run notices do not become false-positive queued run IDs", asy
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   assert.match(workflow, /Cancelling stale queued legacy Browser Worker run \$candidate[^\n]*>&2/);
 });
+
+test("legacy stale-run age is measured from runner start time", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
+  assert.match(workflow, /date -d "\$active_started_at"/);
+  assert.doesNotMatch(workflow, /date -d "\$active_created_at"/);
+});
