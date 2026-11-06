@@ -114,33 +114,35 @@ test("legacy stale-run age is measured from runner start time", async () => {
 });
 
 
-test("legacy worker prefers the runner-provided Chrome and falls back to Playwright Chromium", async () => {
+test("legacy worker installs and uses Playwright-managed Chromium", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   const install = workflow.slice(
-    workflow.indexOf("Install Chromium and OS dependencies"),
+    workflow.indexOf("Install Playwright-managed Chromium and OS dependencies"),
     workflow.indexOf("Run VM setup scripts"),
   );
   const resolve = workflow.slice(
     workflow.indexOf("Resolve Chromium executable"),
     workflow.indexOf("Run browser worker and interactive desktop"),
   );
-  assert.match(install, /command -v google-chrome/);
-  assert.match(install, /npx playwright install --with-deps chromium/);
-  assert.match(resolve, /command -v google-chrome/);
+  assert.match(install, /node_modules\/playwright-core\/cli\.js/);
+  assert.match(install, /install --with-deps chromium/);
+  assert.match(install, /PLAYWRIGHT_CHROMIUM_BIN=/);
+  assert.match(resolve, /chromium\.executablePath\(\)/);
   assert.match(resolve, /CHROMIUM_BIN=\$chromium_bin/);
+  assert.doesNotMatch(install + resolve, /command -v chromium|command -v google-chrome/);
 });
 
-
-test("legacy worker prefers open-source Chromium before Google Chrome", async () => {
+test("legacy worker fails closed instead of falling back to system Chromium", async () => {
   const workflow = await readFile(new URL("../.github/workflows/browser-worker.yml", import.meta.url), "utf8");
   const install = workflow.slice(
-    workflow.indexOf("Install Chromium and OS dependencies"),
+    workflow.indexOf("Install Playwright-managed Chromium and OS dependencies"),
     workflow.indexOf("Run VM setup scripts"),
   );
   const resolve = workflow.slice(
     workflow.indexOf("Resolve Chromium executable"),
     workflow.indexOf("Run browser worker and interactive desktop"),
   );
-  assert.match(install, /command -v chromium[^\n]*\|\| command -v google-chrome/);
-  assert.match(resolve, /command -v chromium \|\| command -v google-chrome/);
+  assert.match(install, /refusing to fall back to system Chromium/);
+  assert.match(resolve, /Playwright-managed Chromium is not executable/);
+  assert.doesNotMatch(resolve, /command -v chromium|command -v google-chrome/);
 });
