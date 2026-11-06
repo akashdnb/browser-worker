@@ -45,7 +45,8 @@ export async function removeChromiumAtomicWriteFiles(profileDir) {
 /** Build a clean X11 environment without inheriting an invalid runner DBus address. */
 export function desktopProcessEnvironment(source, display) {
   const env = { ...source, DISPLAY: display };
-  delete env.DBUS_SESSION_BUS_ADDRESS;
-  delete env.DBUS_SYSTEM_BUS_ADDRESS;
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("DBUS_")) delete env[key];
+  }
   return env;
 }
