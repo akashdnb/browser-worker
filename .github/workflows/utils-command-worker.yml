@@ -40,7 +40,7 @@ jobs:
   worker:
     name: Personal command worker
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.lifetime_hours == '6' && 350 || inputs.lifetime_hours * 60 }}
+    timeout-minutes: ${{ inputs.lifetime_hours == '1' && 60 || inputs.lifetime_hours == '2' && 120 || inputs.lifetime_hours == '3' && 180 || inputs.lifetime_hours == '4' && 240 || inputs.lifetime_hours == '5' && 300 || 350 }}
     steps:
       - name: Check out worker host repository
         uses: actions/checkout@v4
