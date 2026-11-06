@@ -17,11 +17,41 @@ async def _send_json(websocket, payload: dict) -> None:
     await websocket.send(json.dumps(payload))
 
 
-async def _status(websocket, status: str, message: str) -> None:
-    await _send_json(websocket, {"type": "worker.status", "environment_status": status, "message": message})
+async def _status(
+    websocket,
+    status: str,
+    message: str,
+    *,
+    task_id: str | None = None,
+    task_name: str | None = None,
+    task_status: str | None = None,
+    duration_seconds: float | None = None,
+) -> None:
+    payload = {
+        "type": "worker.status",
+        "environment_status": status,
+        "message": message,
+    }
+    if task_id:
+        payload["task"] = {
+            "id": task_id,
+            "name": task_name or task_id,
+            "status": task_status or status,
+            "message": message,
+            "duration_seconds": duration_seconds,
+            "updated_at": time.time(),
+        }
+    await _send_json(websocket, payload)
 
 
-async def _stream_process(websocket, command: list[str] | str, *, shell: bool = False, timeout: int = 600) -> None:
+async def _stream_process(
+    websocket,
+    command: list[str] | str,
+    *,
+    request_id: str,
+    shell: bool = False,
+    timeout: int = 600,
+) -> None:
     process = await asyncio.create_subprocess_shell(
         command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         start_new_session=True,
@@ -36,7 +66,7 @@ async def _stream_process(websocket, command: list[str] | str, *, shell: bool = 
             if not chunk:
                 break
             await _send_json(websocket, {
-                "type": "worker.output", "request_id": SETUP_REQUEST_ID,
+                "type": "worker.output", "request_id": request_id,
                 "stream": "stdout", "data": chunk.decode("utf-8", errors="replace"),
             })
 
@@ -47,10 +77,68 @@ async def _stream_process(websocket, command: list[str] | str, *, shell: bool = 
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, 9)
         await process.wait()
-        raise RuntimeError(f"Setup command timed out after {timeout}s: {command}")
+        await pump_task
+        raise RuntimeError(f"Timed out after {timeout}s")
     await pump_task
     if process.returncode:
-        raise RuntimeError(f"Setup command failed with exit code {process.returncode}: {command}")
+        raise RuntimeError(f"Exited with code {process.returncode}")
+
+
+async def _run_setup_task(
+    websocket,
+    *,
+    task_id: str,
+    name: str,
+    command: list[str] | str,
+    shell: bool = False,
+    timeout: int = 600,
+    retries: int = 2,
+) -> dict:
+    started = time.monotonic()
+    request_id = f"environment-setup:{task_id}"
+    for attempt in range(1, retries + 2):
+        await _status(
+            websocket, "preparing",
+            f"{name}: attempt {attempt}/{retries + 1}",
+            task_id=task_id, task_name=name, task_status="running",
+        )
+        try:
+            await _stream_process(
+                websocket, command, request_id=request_id,
+                shell=shell, timeout=timeout,
+            )
+            duration = round(time.monotonic() - started, 3)
+            await _status(
+                websocket, "preparing", f"{name}: completed",
+                task_id=task_id, task_name=name, task_status="completed",
+                duration_seconds=duration,
+            )
+            return {"id": task_id, "name": name, "status": "completed", "duration_seconds": duration}
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            await _send_json(websocket, {
+                "type": "worker.output", "request_id": request_id,
+                "stream": "stderr",
+                "data": f"[{name}] attempt {attempt} failed: {detail}\n",
+            })
+            if attempt <= retries:
+                await _status(
+                    websocket, "preparing",
+                    f"{name}: retrying after failure ({attempt}/{retries})",
+                    task_id=task_id, task_name=name, task_status="retrying",
+                )
+                await asyncio.sleep(min(2 ** attempt, 10))
+                continue
+            duration = round(time.monotonic() - started, 3)
+            await _status(
+                websocket, "preparing", f"{name}: failed — {detail}",
+                task_id=task_id, task_name=name, task_status="failed",
+                duration_seconds=duration,
+            )
+            return {
+                "id": task_id, "name": name, "status": "failed",
+                "message": detail, "duration_seconds": duration,
+            }
 
 
 async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
@@ -60,43 +148,106 @@ async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
         allowed_profiles = {"minimal", "python", "node", "playwright-chromium", "devops"}
         allowed_setup = {"apt_packages", "pip_packages", "npm_packages", "commands"}
         if (not isinstance(profiles, list) or not profiles
-                or any(profile not in allowed_profiles for profile in profiles)
+                or any(not isinstance(profile, str) or profile not in allowed_profiles for profile in profiles)
                 or not isinstance(setup, dict) or set(setup) - allowed_setup):
             raise RuntimeError("Invalid environment configuration")
+        for key in allowed_setup:
+            if key not in setup:
+                setup[key] = []
+            if not isinstance(setup[key], list) or any(not isinstance(item, str) or not item.strip() for item in setup[key]):
+                raise RuntimeError(f"Invalid setup entries for {key}")
 
+        tasks: list[dict] = []
         apt = list(setup.get("apt_packages", []))
         if "devops" in profiles:
             apt += ["jq", "yq", "ripgrep", "shellcheck"]
+        apt = list(dict.fromkeys(apt))
         if apt:
-            await _status(websocket, "preparing", "Updating package indexes")
-            await _stream_process(websocket, ["sudo", "apt-get", "update"], timeout=300)
-            await _status(websocket, "preparing", "Installing system packages")
-            await _stream_process(websocket, ["sudo", "apt-get", "install", "-y", "--no-install-recommends", *dict.fromkeys(apt)], timeout=600)
+            # APT must be serialized as one package-manager transaction. Its
+            # network fetches use APT's own retry mechanism.
+            update = await _run_setup_task(
+                websocket, task_id="apt-update", name="APT package index refresh",
+                command=["sudo", "apt-get", "-o", "Acquire::Retries=3",
+                         "-o", "Acquire::http::Timeout=60",
+                         "-o", "Acquire::https::Timeout=60", "update"],
+                timeout=600,
+            )
+            tasks.append(update)
+            if update["status"] == "completed":
+                tasks.append(await _run_setup_task(
+                    websocket, task_id="apt-install", name=f"APT packages ({', '.join(apt)})",
+                    command=["sudo", "apt-get", "-o", "Acquire::Retries=3",
+                             "-o", "Acquire::http::Timeout=60",
+                             "-o", "Acquire::https::Timeout=60",
+                             "install", "-y", "--no-install-recommends", *apt],
+                    timeout=1200,
+                ))
+            else:
+                tasks.append({
+                    "id": "apt-install", "name": "APT package installation",
+                    "status": "skipped", "message": "Skipped because APT index refresh failed",
+                })
 
         pip = list(setup.get("pip_packages", []))
         if "playwright-chromium" in profiles:
-            pip += ["playwright"]
+            pip.append("playwright")
+        pip = list(dict.fromkeys(pip))
         if pip:
-            await _status(websocket, "preparing", "Installing Python packages")
-            await _stream_process(websocket, ["python", "-m", "pip", "install", "--disable-pip-version-check", *dict.fromkeys(pip)], timeout=600)
+            tasks.append({
+                "id": "pip-install", "name": f"Python packages ({', '.join(pip)})",
+                "command": ["python", "-m", "pip", "install", "--disable-pip-version-check", *pip],
+                "timeout": 900,
+            })
         if "playwright-chromium" in profiles:
-            await _status(websocket, "preparing", "Installing Playwright Chromium")
-            await _stream_process(websocket, ["python", "-m", "playwright", "install", "--with-deps", "chromium"], timeout=900)
-
-        npm = list(setup.get("npm_packages", []))
+            tasks.append({
+                "id": "playwright-chromium", "name": "Playwright Chromium",
+                "command": ["python", "-m", "playwright", "install", "chromium"],
+                "timeout": 1200,
+            })
+        npm = list(dict.fromkeys(setup.get("npm_packages", [])))
         if npm:
-            await _status(websocket, "preparing", "Installing global npm packages")
-            await _stream_process(websocket, ["npm", "install", "--global", *dict.fromkeys(npm)], timeout=600)
+            tasks.append({
+                "id": "npm-install", "name": f"Global npm packages ({', '.join(npm)})",
+                "command": ["npm", "install", "--global", *npm],
+                "timeout": 900,
+            })
         for index, command in enumerate(setup.get("commands", []), start=1):
-            await _status(websocket, "preparing", f"Running custom setup command {index}")
-            await _stream_process(websocket, command, shell=True, timeout=600)
+            tasks.append({
+                "id": f"custom-{index}", "name": f"Custom setup command {index}",
+                "command": command, "shell": True, "timeout": 600,
+            })
 
-        await _status(websocket, "ready", "Environment is ready")
+        async def run_task(task: dict) -> dict:
+            return await _run_setup_task(
+                websocket, task_id=task["id"], name=task["name"],
+                command=task["command"], shell=task.get("shell", False),
+                timeout=task.get("timeout", 600),
+            )
+
+        # Independent package managers/custom tasks can run concurrently.
+        # APT index refresh + install is kept serial to avoid dpkg lock races.
+        pending = [task for task in tasks if "command" in task]
+        results = await asyncio.gather(*(run_task(task) for task in pending), return_exceptions=True)
+        for task, result in zip(pending, results):
+            if isinstance(result, BaseException):
+                tasks.append({
+                    "id": task["id"], "name": task["name"], "status": "failed",
+                    "message": f"{type(result).__name__}: {result}",
+                })
+
+        failed = [task for task in tasks if task.get("status") in {"failed", "skipped"}]
+        completed = [task for task in tasks if task.get("status") == "completed"]
+        if failed:
+            overall = "partially_ready" if completed else "failed"
+            summary = f"Environment setup finished: {len(completed)} completed, {len(failed)} failed or skipped"
+            await _status(websocket, overall, summary)
+        else:
+            await _status(websocket, "ready", "Environment is ready")
     except Exception as exc:
         with contextlib.suppress(Exception):
             await _send_json(websocket, {
-                "type": "worker.output", "request_id": SETUP_REQUEST_ID,
-                "stream": "stderr", "data": f"Environment setup failed: {exc}\n",
+                "type": "worker.output", "request_id": "environment-setup:validation",
+                "stream": "stderr", "data": f"Environment setup configuration error: {exc}\n",
             })
             await _status(websocket, "failed", str(exc)[:500])
 
