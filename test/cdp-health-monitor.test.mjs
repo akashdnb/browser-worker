@@ -56,6 +56,7 @@ test("marks an open worker socket unready when Chromium exits, then readies it a
       const response = await fetch(`${endpoint}/json/version`, {
         signal: AbortSignal.timeout(100),
       });
+      await response.arrayBuffer();
       return { healthy: response.ok, reason: `CDP returned HTTP ${response.status}` };
     } catch (error) {
       return { healthy: false, reason: error instanceof Error ? error.message : String(error) };
