@@ -373,16 +373,28 @@ jobs:
             timeout "$VM_STARTUP_TIMEOUT_SECONDS" npm install --no-save ws@^8.18.0
           fi
 
-      - name: Install Chromium and OS dependencies
+      - name: Install Playwright-managed Chromium and OS dependencies
         if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
         env:
           VM_STARTUP_TIMEOUT_SECONDS: ${{ env.VM_STARTUP_TIMEOUT_SECONDS || '900' }}
         run: |
-          if command -v chromium >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1; then
-            echo "Using runner-provided browser: $(command -v chromium || command -v google-chrome)"
-          else
-            timeout "$VM_STARTUP_TIMEOUT_SECONDS" npx playwright install --with-deps chromium
+          set -euo pipefail
+          playwright_cli="node_modules/playwright-core/cli.js"
+          if [ ! -f "$playwright_cli" ]; then
+            playwright_cli="node_modules/@playwright/mcp/node_modules/playwright-core/cli.js"
           fi
+          test -f "$playwright_cli" || {
+            echo "::error::The Playwright MCP dependency did not install playwright-core; refusing to fall back to system Chromium."
+            exit 1
+          }
+          timeout "$VM_STARTUP_TIMEOUT_SECONDS" node "$playwright_cli" install --with-deps chromium
+          chromium_bin="$(node -e 'const { chromium } = require("playwright-core"); process.stdout.write(chromium.executablePath())')"
+          test -x "$chromium_bin" || {
+            echo "::error::Playwright-managed Chromium is missing at $chromium_bin"
+            exit 1
+          }
+          echo "PLAYWRIGHT_CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
+          echo "Installed Playwright-managed Chromium: $("$chromium_bin" --version)"
 
       - name: Run VM setup scripts
         if: ${{ inputs.vm_id }}
@@ -664,15 +676,67 @@ jobs:
           fi
 
       - name: Resolve Chromium executable
-        if: ${{ inputs.worker_mode != 'compute' }}
+        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
         run: |
-          chromium_bin="$(find "$HOME/.cache/ms-playwright" -type f -path '*/chrome-linux64/chrome' | head -n 1)"
+          set -euo pipefail
+          chromium_bin="${PLAYWRIGHT_CHROMIUM_BIN:-}"
           if [ -z "$chromium_bin" ]; then
-            chromium_bin="$(command -v chromium || command -v google-chrome || true)"
+            chromium_bin="$(node -e 'const { chromium } = require("playwright-core"); process.stdout.write(chromium.executablePath())')"
           fi
-          test -n "$chromium_bin"
+          test -x "$chromium_bin" || {
+            echo "::error::Playwright-managed Chromium is not executable at $chromium_bin"
+            exit 1
+          }
           echo "CHROMIUM_BIN=$chromium_bin" >> "$GITHUB_ENV"
-          echo "Using shared interactive Chromium at $chromium_bin"
+          echo "Using pinned Playwright Chromium: $("$chromium_bin" --version)"
+
+      - name: Verify Chromium DevTools startup
+        if: ${{ steps.bootstrap.outputs.worker_mode != 'compute' }}
+        run: |
+          set -euo pipefail
+          test -x "$PLAYWRIGHT_CHROMIUM_BIN"
+          smoke_dir="$(mktemp -d)"
+          log_file="$RUNNER_TEMP/chromium-cdp-smoke.log"
+          port=19223
+          setsid "$PLAYWRIGHT_CHROMIUM_BIN" \
+            --headless=new \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-gpu \
+            --disable-extensions \
+            --no-first-run \
+            --no-default-browser-check \
+            --remote-debugging-address=127.0.0.1 \
+            --remote-debugging-port="$port" \
+            --remote-allow-origins='*' \
+            --user-data-dir="$smoke_dir" \
+            about:blank >"$log_file" 2>&1 &
+          chromium_pid=$!
+          cleanup() {
+            kill -TERM -- "-$chromium_pid" 2>/dev/null || true
+            sleep 0.2
+            kill -KILL -- "-$chromium_pid" 2>/dev/null || true
+            wait "$chromium_pid" 2>/dev/null || true
+            rm -rf "$smoke_dir"
+          }
+          trap cleanup EXIT
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:$port/json/version" > "$smoke_dir/version.json"; then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$chromium_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != "true" ]; then
+            echo "::error::Playwright Chromium failed to open its DevTools endpoint on port $port"
+            tail -n 100 "$log_file" || true
+            exit 1
+          fi
+          echo "Chromium CDP smoke test passed: $(jq -r '.Browser // "unknown browser"' "$smoke_dir/version.json")"
 
       - name: Run browser worker and interactive desktop
         env:
