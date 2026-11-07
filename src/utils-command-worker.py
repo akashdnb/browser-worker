@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 
 from websockets.asyncio.client import connect
 
+from session_agent import send_session_snapshot
+
 MAX_CHUNK = 16_384
 SETUP_REQUEST_ID = "environment-setup"
 _SEND_LOCK = asyncio.Lock()
@@ -354,6 +356,11 @@ async def _connect_once(socket_url: str, worker_id: str, token: str, profiles_js
             message = json.loads(await websocket.recv())
             if message.get("type") == "worker.exec":
                 asyncio.create_task(_execute(websocket, message, active_processes))
+            elif message.get("type") == "worker.session.extract":
+                asyncio.create_task(send_session_snapshot(
+                    websocket, str(message.get("request_id") or ""),
+                    message.get("components") or [], _send_json,
+                ))
             elif message.get("type") == "worker.cancel":
                 request_id = str(message.get("request_id") or "")
                 process = active_processes.get(request_id)
