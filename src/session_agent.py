@@ -201,7 +201,12 @@ def restore_session_components(components: dict[str, bytes]) -> dict[str, str]:
 
 
 async def receive_session_restore(websocket) -> dict[str, str]:
-    first = json.loads(await websocket.recv())
+    try:
+        first_message = await asyncio.wait_for(websocket.recv(), timeout=5)
+    except asyncio.TimeoutError:
+        # Older Utils deployments do not yet send the session handshake.
+        return {}
+    first = json.loads(first_message)
     if first.get("type") == "worker.session.restore.none":
         return {}
     if first.get("type") == "worker.session.restore.error":
