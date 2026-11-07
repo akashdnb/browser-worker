@@ -393,7 +393,7 @@ import socket
 import sys
 if len(sys.argv) > 1 and sys.argv[1] != "get":
     raise SystemExit(0)
-fields = {}
+fields = {{}}
 for _line in sys.stdin:
     if not _line.strip():
         break
