@@ -28,6 +28,10 @@ on:
         description: JSON custom package/setup object
         required: true
         type: string
+      worker_auth_token:
+        description: Per-worker authentication grant issued by Utils
+        required: false
+        type: string
 
 concurrency:
   group: utils-command-worker-${{ inputs.worker_id }}
@@ -66,6 +70,7 @@ jobs:
           UTILS_WORKER_SERVER_URL: ${{ inputs.server_url }}
           UTILS_WORKER_LIFETIME_HOURS: ${{ inputs.lifetime_hours }}
           UTILS_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
+          UTILS_WORKER_AUTH_TOKEN: ${{ inputs.worker_auth_token }}
           UTILS_WORKER_PROFILES: ${{ inputs.profiles }}
           UTILS_WORKER_CUSTOM_SETUP: ${{ inputs.custom_setup }}
         run: |
