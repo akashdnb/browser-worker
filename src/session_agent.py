@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import os
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -172,9 +173,9 @@ def restore_session_components(components: dict[str, bytes]) -> dict[str, str]:
                 if not isinstance(inventory, dict) or not isinstance(inventory.get("packages"), dict):
                     raise ValueError("invalid package inventory")
                 packages = inventory["packages"]
-                apt = [str(item.get("name")) for item in packages.get("apt", []) if isinstance(item, dict) and item.get("name")]
-                pip = [f"{item['name']}=={item['version']}" for item in packages.get("pip", []) if isinstance(item, dict) and item.get("name") and item.get("version")]
-                npm = [f"{item['name']}@{item['version']}" for item in packages.get("npm", []) if isinstance(item, dict) and item.get("name") and item.get("version")]
+                apt = [str(item["name"]) for item in packages.get("apt", []) if isinstance(item, dict) and isinstance(item.get("name"), str) and re.fullmatch(r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?", item["name"])]
+                pip = [f"{item['name']}=={item['version']}" for item in packages.get("pip", []) if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("version"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", item["name"]) and re.fullmatch(r"[A-Za-z0-9.+!_-]+", item["version"])]
+                npm = [f"{item['name']}@{item['version']}" for item in packages.get("npm", []) if isinstance(item, dict) and isinstance(item.get("name"), str) and isinstance(item.get("version"), str) and re.fullmatch(r"(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+", item["name"]) and re.fullmatch(r"[A-Za-z0-9.+_-]+", item["version"])]
                 if apt:
                     update = _run(["sudo", "apt-get", "-o", "Acquire::Retries=3", "update"], timeout=600)
                     if update[0] == 0:
