@@ -12,11 +12,13 @@ const workerId = process.env.VM_WORKER_ID ?? `github-${process.env.GITHUB_RUN_ID
 const display = process.env.DISPLAY ?? ":99";
 const vncPort = Number.parseInt(process.env.VM_VNC_PORT ?? "5900", 10);
 const cdpPort = Number.parseInt(process.env.VM_CHROMIUM_DEBUG_PORT ?? "9222", 10);
+const cdpStartupTimeoutMs = Number.parseInt(process.env.VM_CHROMIUM_CDP_STARTUP_TIMEOUT_MS ?? "180000", 10);
 const chromium = process.env.CHROMIUM_BIN;
 const userDataDir = process.env.PLAYWRIGHT_MCP_USER_DATA_DIR ?? "/tmp/browser-worker-profile";
 
 if (!gatewayUrl || !utilsBaseUrl || !token) throw new Error("UTILS_BROWSER_WORKER_URL and UTILS_BROWSER_WORKER_TOKEN are required");
 if (!chromium) throw new Error("CHROMIUM_BIN is required for the interactive VM");
+if (!Number.isFinite(cdpStartupTimeoutMs) || cdpStartupTimeoutMs < 1_000) throw new Error("VM_CHROMIUM_CDP_STARTUP_TIMEOUT_MS must be at least 1000");
 
 const processes = [];
 const vncSockets = new Map();
@@ -203,7 +205,7 @@ async function startDesktop() {
 
   // Start VNC only after the display and browser are confirmed. A transient
   // x11vnc startup failure must not kill Chromium while CDP is booting.
-  if (!(await probeCdp(30_000))) {
+  if (!(await probeCdp(cdpStartupTimeoutMs))) {
     await killStaleChromium();
     throw new Error(`Chromium CDP did not become ready at 127.0.0.1:${cdpPort}`);
   }
