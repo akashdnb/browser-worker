@@ -233,22 +233,34 @@ async function discoverExtensionTarget(cdpPort, timeoutMs = 30_000) {
     try {
       lastTargets = await getCdpJson(`http://127.0.0.1:${cdpPort}`, "/json/list", { timeoutMs: 1500 });
       const target = lastTargets.find((item) => item.type === "service_worker" && /^chrome-extension:\/\/[a-p]{32}\//.test(item.url || ""));
-      if (target) return target;
+      if (target) {
+        const extensionId = new URL(target.url).hostname;
+        try {
+          const ready = await cdpEvaluate(
+            target.webSocketDebuggerUrl,
+            `typeof chrome !== "undefined" && chrome.runtime?.id === ${JSON.stringify(extensionId)} && Boolean(chrome.storage?.local)`,
+            1_500,
+          );
+          if (ready === true) return target;
+        } catch {
+          // Chromium can publish the service-worker target before its extension APIs are ready.
+        }
+      }
     } catch {
       // Chromium can take a few seconds to bind the CDP port after launch.
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`BrowserMCP extension service worker was not found on CDP ${cdpPort}; targets=${JSON.stringify(lastTargets).slice(0, 1000)}`);
+  throw new Error(`BrowserMCP extension service worker did not become ready on CDP ${cdpPort}; targets=${JSON.stringify(lastTargets).slice(0, 1000)}`);
 }
 
-function cdpEvaluate(targetWebSocketUrl, expression) {
+function cdpEvaluate(targetWebSocketUrl, expression, timeoutMs = 15_000) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(targetWebSocketUrl);
     const timeout = setTimeout(() => {
       socket.close();
       reject(new Error("Timed out evaluating BrowserMCP extension bootstrap script"));
-    }, 15_000);
+    }, timeoutMs);
     socket.addEventListener("open", () => {
       socket.send(JSON.stringify({
         id: 1,
