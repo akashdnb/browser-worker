@@ -23,7 +23,7 @@ Dispatch **Browser Worker** from the Actions tab to start a worker when none is 
 
 ## Security notes
 
-This is a first usable version, not a multi-tenant browser service. The relay authenticates the worker with a shared secret and binds the connection to the private gateway. Never expose the local Playwright MCP port publicly or place the shared secret in repository files/logs. The public repo intentionally contains no credentials.
+This is a first usable version, not a multi-tenant browser service. The relay authenticates the worker with the shared bootstrap secret and a per-run GitHub Actions OIDC identity bound to the expected repository, workflow, ref and run ID. The OIDC request credential is removed from the process environment before user commands run. Never expose the local Playwright MCP port publicly or place the shared secret in repository files/logs. The public repo intentionally contains no credentials.
 
 ## Utils command workers
 
