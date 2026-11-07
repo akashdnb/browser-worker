@@ -298,6 +298,7 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
     interrupted = False
     env = os.environ.copy()
     env.pop("UTILS_WORKER_TOKEN", None)
+    env.pop("UTILS_WORKER_AUTH_TOKEN", None)
     try:
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -342,9 +343,9 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
     })
 
 
-async def _connect_once(socket_url: str, worker_id: str, token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event) -> None:
+async def _connect_once(socket_url: str, worker_id: str, token: str, worker_auth_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event) -> None:
     async with connect(socket_url, ping_interval=25, ping_timeout=25, max_size=2**20) as websocket:
-        await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token})
+        await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token, "worker_auth_token": worker_auth_token})
         response = json.loads(await websocket.recv())
         if response.get("type") != "worker.auth.ok":
             raise RuntimeError("Utils rejected the worker connection")
@@ -387,6 +388,9 @@ async def run() -> None:
     worker_id = os.environ.get("UTILS_WORKER_ID", "").strip()
     server_url = os.environ.get("UTILS_WORKER_SERVER_URL", "").strip()
     token = os.environ.get("UTILS_WORKER_TOKEN", "")
+    worker_auth_token = os.environ.get("UTILS_WORKER_AUTH_TOKEN", "")
+    os.environ.pop("UTILS_WORKER_TOKEN", None)
+    os.environ.pop("UTILS_WORKER_AUTH_TOKEN", None)
     profiles_json = os.environ.get("UTILS_WORKER_PROFILES", '["minimal"]')
     setup_json = os.environ.get("UTILS_WORKER_CUSTOM_SETUP", "{}")
     if not worker_id or not token or not server_url:
@@ -400,7 +404,7 @@ async def run() -> None:
     setup_started = asyncio.Event()
     while True:
         try:
-            await _connect_once(socket_url, worker_id, token, profiles_json, setup_json, setup_started)
+            await _connect_once(socket_url, worker_id, token, worker_auth_token, profiles_json, setup_json, setup_started)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
