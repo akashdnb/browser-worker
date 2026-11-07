@@ -4,6 +4,9 @@ import asyncio
 import contextlib
 import json
 import os
+import stat
+import subprocess
+import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -344,12 +347,12 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
     })
 
 
-def _fetch_oidc_token(request_url: str, request_token: str) -> str:
+def _fetch_oidc_token(request_url: str, request_token: str, audience: str = "utils-worker") -> str:
     if not request_url or not request_token:
         return ""
     parsed = urlsplit(request_url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query["audience"] = "utils-worker"
+    query["audience"] = audience
     url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
     request = Request(url, headers={"Authorization": f"Bearer {request_token}", "Accept": "application/json"})
     with urlopen(request, timeout=10) as response:
@@ -360,13 +363,87 @@ def _fetch_oidc_token(request_url: str, request_token: str) -> str:
     return token
 
 
-async def _connect_once(socket_url: str, worker_id: str, token: str, oidc_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event) -> None:
+async def _start_git_credential_server(request_url: str, request_token: str):
+    """Keep the GitHub OIDC request credential in the agent process, not command environments."""
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            command = (await asyncio.wait_for(reader.readline(), timeout=5)).decode("ascii", errors="ignore").strip()
+            if command != "get":
+                writer.write(b"\\n")
+            else:
+                token = await asyncio.to_thread(_fetch_oidc_token, request_url, request_token, "utils-git-proxy")
+                writer.write((token + "\\n").encode("utf-8"))
+            await writer.drain()
+        except Exception:
+            writer.write(b"\\n")
+            with contextlib.suppress(Exception):
+                await writer.drain()
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, limit=1024)
+    port = server.sockets[0].getsockname()[1]
+    helper_path = os.path.join(tempfile.gettempdir(), f"utils-git-credential-{os.getpid()}")
+    helper_source = f"""#!/usr/bin/env python3
+import socket
+import sys
+if len(sys.argv) > 1 and sys.argv[1] != "get":
+    raise SystemExit(0)
+for _line in sys.stdin:
+    if not _line.strip():
+        break
+with socket.create_connection(("127.0.0.1", {port}), timeout=15) as connection:
+    connection.sendall(b"get\\n")
+    token = connection.makefile("r", encoding="utf-8").readline().strip()
+if not token:
+    raise SystemExit(1)
+print("username=worker")
+print("password=" + token)
+print()
+"""
+    descriptor = os.open(helper_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as helper_file:
+        helper_file.write(helper_source)
+    os.chmod(helper_path, 0o700)
+    return server, helper_path
+
+
+def _configure_git_proxy(server_url: str, worker_id: str, helper_path: str) -> None:
+    proxy_prefix = f"{server_url.rstrip('/')}/git-proxy/{worker_id}/"
+    subprocess.run(
+        ["git", "config", "--global", f"url.{proxy_prefix}.insteadOf", "https://github.com/"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "config", "--global", "credential.useHttpPath", "true"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "config", "--global", "--replace-all", "credential.helper", helper_path],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+async def _connect_once(socket_url: str, server_url: str, worker_id: str, token: str, oidc_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event, git_helper_path: str | None) -> None:
     async with connect(socket_url, ping_interval=25, ping_timeout=25, max_size=2**20) as websocket:
         await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token, "oidc_token": oidc_token})
         response = json.loads(await websocket.recv())
         if response.get("type") != "worker.auth.ok":
             raise RuntimeError("Utils rejected the worker connection")
         print(f"Worker {worker_id} connected to Utils", flush=True)
+        if response.get("git_proxy_enabled"):
+            if not git_helper_path:
+                raise RuntimeError("Git proxy credential helper is unavailable")
+            await asyncio.to_thread(_configure_git_proxy, server_url, worker_id, git_helper_path)
+            print("GitHub HTTPS proxy configured for this worker", flush=True)
         restore_errors = await receive_session_restore(websocket)
         for component, error in restore_errors.items():
             await _status(websocket, "preparing", f"Session restore failed for {component}: {error}", task_id=f"session-restore-{component}", task_name=f"Restore {component}", task_status="failed")
@@ -420,10 +497,14 @@ async def run() -> None:
     socket_url = f"{scheme}://{parsed.netloc}/github-workers/agent"
     delay = 2
     setup_started = asyncio.Event()
+    git_credential_server = None
+    git_helper_path = None
+    if oidc_request_url and oidc_request_token:
+        git_credential_server, git_helper_path = await _start_git_credential_server(oidc_request_url, oidc_request_token)
     while True:
         try:
             oidc_token = await asyncio.to_thread(_fetch_oidc_token, oidc_request_url, oidc_request_token) if oidc_request_url and oidc_request_token else ""
-            await _connect_once(socket_url, worker_id, token, oidc_token, profiles_json, setup_json, setup_started)
+            await _connect_once(socket_url, server_url, worker_id, token, oidc_token, profiles_json, setup_json, setup_started, git_helper_path)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
