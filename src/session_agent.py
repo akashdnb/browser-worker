@@ -51,9 +51,8 @@ def _safe_tar_info(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
     parts = Path(info.name).parts
     if any(part in {".git", "node_modules", "__pycache__"} for part in parts):
         return None
-    if Path(info.name).name in _EXCLUDED_NAMES:
+    if Path(info.name).name in _EXCLUDED_NAMES or info.issym() or info.islnk():
         return None
-    # Preserve symlinks as links; never dereference them into arbitrary paths.
     return info
 
 
@@ -126,6 +125,8 @@ def extract_session_components(requested: list[str]) -> tuple[dict[str, bytes], 
                 if profile is None:
                     raise ValueError("no supported browser profile directory is available on this worker")
                 captured[component] = _archive_paths([profile])
+                if not captured[component]:
+                    raise ValueError("browser profile could not be archived safely")
         except Exception as exc:
             errors[component] = f"{type(exc).__name__}: {str(exc)[:300]}"
     return captured, errors
