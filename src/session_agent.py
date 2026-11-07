@@ -29,8 +29,9 @@ _EXCLUDED_NAMES = {
 
 
 def _archive_paths(paths: list[Path]) -> bytes:
-    existing = [path for path in paths if path.exists()]
-    if not existing:
+    existing = [path for path in paths if path.exists() and not path.is_symlink()]
+    has_files = any(path.is_file() or (path.is_dir() and any(item.is_file() and not item.is_symlink() for item in path.rglob("*"))) for path in existing)
+    if not has_files:
         return b""
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
@@ -52,6 +53,8 @@ def _safe_tar_info(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
     if any(part in {".git", "node_modules", "__pycache__"} for part in parts):
         return None
     if Path(info.name).name in _EXCLUDED_NAMES or info.issym() or info.islnk():
+        return None
+    if not (info.isfile() or info.isdir()):
         return None
     return info
 
