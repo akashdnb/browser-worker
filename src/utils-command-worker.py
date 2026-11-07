@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 from websockets.asyncio.client import connect
 
-from session_agent import send_session_snapshot
+from session_agent import receive_session_restore, send_session_snapshot
 
 MAX_CHUNK = 16_384
 SETUP_REQUEST_ID = "environment-setup"
@@ -145,7 +145,7 @@ async def _run_setup_task(
             }
 
 
-async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
+async def _provision(websocket, profiles_json: str, setup_json: str, restore_errors: dict[str, str] | None = None) -> None:
     try:
         profiles = json.loads(profiles_json or '["minimal"]')
         setup = json.loads(setup_json or "{}")
@@ -273,9 +273,10 @@ async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
         final_tasks.extend(results_by_id.values())
         failed = [task for task in final_tasks if task.get("status") in {"failed", "skipped"}]
         completed = [task for task in final_tasks if task.get("status") == "completed"]
-        if failed:
-            overall = "partially_ready" if completed else "failed"
-            summary = f"Environment setup finished: {len(completed)} completed, {len(failed)} failed or skipped"
+        restore_errors = restore_errors or {}
+        if failed or restore_errors:
+            overall = "partially_ready" if completed or restore_errors else "failed"
+            summary = f"Environment setup finished: {len(completed)} setup tasks completed, {len(failed)} failed or skipped, {len(restore_errors)} restore errors"
             await _status(websocket, overall, summary)
         else:
             await _status(websocket, "ready", "Environment is ready")
@@ -348,10 +349,13 @@ async def _connect_once(socket_url: str, worker_id: str, token: str, profiles_js
         if response.get("type") != "worker.auth.ok":
             raise RuntimeError("Utils rejected the worker connection")
         print(f"Worker {worker_id} connected to Utils", flush=True)
+        restore_errors = await receive_session_restore(websocket)
+        for component, error in restore_errors.items():
+            await _status(websocket, "preparing", f"Session restore failed for {component}: {error}", task_id=f"session-restore-{component}", task_name=f"Restore {component}", task_status="failed")
         active_processes: dict[str, asyncio.subprocess.Process] = {}
         if not setup_started.is_set():
             setup_started.set()
-            asyncio.create_task(_provision(websocket, profiles_json, setup_json))
+            asyncio.create_task(_provision(websocket, profiles_json, setup_json, restore_errors))
         while True:
             message = json.loads(await websocket.recv())
             if message.get("type") == "worker.exec":
