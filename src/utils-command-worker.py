@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -374,7 +375,12 @@ async def _start_git_credential_server(request_url: str, request_token: str, ser
                 token = await asyncio.to_thread(_fetch_oidc_token, request_url, request_token, "utils-git-proxy")
                 writer.write((token + "\n").encode("utf-8"))
             await writer.drain()
-        except Exception:
+        except Exception as exc:
+            print(
+                f"Git proxy OIDC credential request failed ({type(exc).__name__})",
+                file=sys.stderr,
+                flush=True,
+            )
             writer.write(b"\n")
             with contextlib.suppress(Exception):
                 await writer.drain()
@@ -399,11 +405,11 @@ for _line in sys.stdin:
         break
     _key, _sep, _value = _line.partition("=")
     if _sep:
-        fields[_key] = _value
+        fields[_key] = _value.rstrip(chr(13) + chr(10))
 if fields.get("protocol") != "https" or fields.get("host") != "{expected_host}" or not fields.get("path", "").startswith("{expected_path}"):
     raise SystemExit(0)
 with socket.create_connection(("127.0.0.1", {port}), timeout=15) as connection:
-    connection.sendall(b"get\\n")
+    connection.sendall(b"get" + bytes([10]))
     token = connection.makefile("r", encoding="utf-8").readline().strip()
 if not token:
     raise SystemExit(1)
