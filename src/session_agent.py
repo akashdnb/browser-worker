@@ -59,9 +59,9 @@ def _safe_tar_info(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
     return info
 
 
-def _run(command: list[str]) -> tuple[int, str, str]:
+def _run(command: list[str], timeout: int = 90) -> tuple[int, str, str]:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
         return result.returncode, result.stdout, result.stderr[-2000:]
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
@@ -176,19 +176,19 @@ def restore_session_components(components: dict[str, bytes]) -> dict[str, str]:
                 pip = [f"{item['name']}=={item['version']}" for item in packages.get("pip", []) if isinstance(item, dict) and item.get("name") and item.get("version")]
                 npm = [f"{item['name']}@{item['version']}" for item in packages.get("npm", []) if isinstance(item, dict) and item.get("name") and item.get("version")]
                 if apt:
-                    update = _run(["sudo", "apt-get", "-o", "Acquire::Retries=3", "update"])
+                    update = _run(["sudo", "apt-get", "-o", "Acquire::Retries=3", "update"], timeout=600)
                     if update[0] == 0:
-                        result = _run(["sudo", "apt-get", "install", "-y", "--no-install-recommends", *apt[:250]])
+                        result = _run(["sudo", "apt-get", "install", "-y", "--no-install-recommends", *apt[:250]], timeout=1200)
                         if result[0] != 0:
                             errors["packages.apt"] = result[2] or "APT package restoration failed"
                     else:
                         errors["packages.apt"] = update[2] or "APT package index refresh failed"
                 if pip:
-                    result = _run([os.sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *pip[:500]])
+                    result = _run([os.sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *pip[:500]], timeout=900)
                     if result[0] != 0:
                         errors["packages.pip"] = result[2] or "Python package restoration failed"
                 if npm:
-                    result = _run(["npm", "install", "--global", *npm[:250]])
+                    result = _run(["npm", "install", "--global", *npm[:250]], timeout=900)
                     if result[0] != 0:
                         errors["packages.npm"] = result[2] or "npm package restoration failed"
                 target = home / ".config" / "utils-worker-session"
