@@ -5,9 +5,12 @@ import contextlib
 import json
 import os
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 from websockets.asyncio.client import connect
+
+from session_agent import receive_session_restore, send_session_snapshot
 
 MAX_CHUNK = 16_384
 SETUP_REQUEST_ID = "environment-setup"
@@ -143,7 +146,7 @@ async def _run_setup_task(
             }
 
 
-async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
+async def _provision(websocket, profiles_json: str, setup_json: str, restore_errors: dict[str, str] | None = None) -> None:
     try:
         profiles = json.loads(profiles_json or '["minimal"]')
         setup = json.loads(setup_json or "{}")
@@ -271,9 +274,10 @@ async def _provision(websocket, profiles_json: str, setup_json: str) -> None:
         final_tasks.extend(results_by_id.values())
         failed = [task for task in final_tasks if task.get("status") in {"failed", "skipped"}]
         completed = [task for task in final_tasks if task.get("status") == "completed"]
-        if failed:
-            overall = "partially_ready" if completed else "failed"
-            summary = f"Environment setup finished: {len(completed)} completed, {len(failed)} failed or skipped"
+        restore_errors = restore_errors or {}
+        if failed or restore_errors:
+            overall = "partially_ready" if completed or restore_errors else "failed"
+            summary = f"Environment setup finished: {len(completed)} setup tasks completed, {len(failed)} failed or skipped, {len(restore_errors)} restore errors"
             await _status(websocket, overall, summary)
         else:
             await _status(websocket, "ready", "Environment is ready")
@@ -295,6 +299,7 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
     interrupted = False
     env = os.environ.copy()
     env.pop("UTILS_WORKER_TOKEN", None)
+    env.pop("UTILS_WORKER_AUTH_TOKEN", None)
     try:
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -339,21 +344,45 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
     })
 
 
-async def _connect_once(socket_url: str, worker_id: str, token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event) -> None:
+def _fetch_oidc_token(request_url: str, request_token: str) -> str:
+    if not request_url or not request_token:
+        return ""
+    parsed = urlsplit(request_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["audience"] = "utils-worker"
+    url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+    request = Request(url, headers={"Authorization": f"Bearer {request_token}", "Accept": "application/json"})
+    with urlopen(request, timeout=10) as response:
+        payload = json.loads(response.read())
+    token = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("GitHub Actions did not issue an OIDC identity token")
+    return token
+
+
+async def _connect_once(socket_url: str, worker_id: str, token: str, oidc_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event) -> None:
     async with connect(socket_url, ping_interval=25, ping_timeout=25, max_size=2**20) as websocket:
-        await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token})
+        await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token, "oidc_token": oidc_token})
         response = json.loads(await websocket.recv())
         if response.get("type") != "worker.auth.ok":
             raise RuntimeError("Utils rejected the worker connection")
         print(f"Worker {worker_id} connected to Utils", flush=True)
+        restore_errors = await receive_session_restore(websocket)
+        for component, error in restore_errors.items():
+            await _status(websocket, "preparing", f"Session restore failed for {component}: {error}", task_id=f"session-restore-{component}", task_name=f"Restore {component}", task_status="failed")
         active_processes: dict[str, asyncio.subprocess.Process] = {}
         if not setup_started.is_set():
             setup_started.set()
-            asyncio.create_task(_provision(websocket, profiles_json, setup_json))
+            asyncio.create_task(_provision(websocket, profiles_json, setup_json, restore_errors))
         while True:
             message = json.loads(await websocket.recv())
             if message.get("type") == "worker.exec":
                 asyncio.create_task(_execute(websocket, message, active_processes))
+            elif message.get("type") == "worker.session.extract":
+                asyncio.create_task(send_session_snapshot(
+                    websocket, str(message.get("request_id") or ""),
+                    message.get("components") or [], _send_json,
+                ))
             elif message.get("type") == "worker.cancel":
                 request_id = str(message.get("request_id") or "")
                 process = active_processes.get(request_id)
@@ -376,6 +405,10 @@ async def run() -> None:
     worker_id = os.environ.get("UTILS_WORKER_ID", "").strip()
     server_url = os.environ.get("UTILS_WORKER_SERVER_URL", "").strip()
     token = os.environ.get("UTILS_WORKER_TOKEN", "")
+    oidc_request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
+    oidc_request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    os.environ.pop("UTILS_WORKER_TOKEN", None)
+    os.environ.pop("ACTIONS_ID_TOKEN_REQUEST_TOKEN", None)
     profiles_json = os.environ.get("UTILS_WORKER_PROFILES", '["minimal"]')
     setup_json = os.environ.get("UTILS_WORKER_CUSTOM_SETUP", "{}")
     if not worker_id or not token or not server_url:
@@ -389,7 +422,8 @@ async def run() -> None:
     setup_started = asyncio.Event()
     while True:
         try:
-            await _connect_once(socket_url, worker_id, token, profiles_json, setup_json, setup_started)
+            oidc_token = await asyncio.to_thread(_fetch_oidc_token, oidc_request_url, oidc_request_token) if oidc_request_url and oidc_request_token else ""
+            await _connect_once(socket_url, worker_id, token, oidc_token, profiles_json, setup_json, setup_started)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

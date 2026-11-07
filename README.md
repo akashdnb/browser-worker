@@ -23,7 +23,7 @@ Dispatch **Browser Worker** from the Actions tab to start a worker when none is 
 
 ## Security notes
 
-This is a first usable version, not a multi-tenant browser service. The relay authenticates the worker with a shared secret and binds the connection to the private gateway. Never expose the local Playwright MCP port publicly or place the shared secret in repository files/logs. The public repo intentionally contains no credentials.
+This is a first usable version, not a multi-tenant browser service. The relay authenticates the worker with the shared bootstrap secret and a per-run GitHub Actions OIDC identity bound to the expected repository, workflow, ref and run ID. The OIDC request credential is removed from the process environment before user commands run. Never expose the local Playwright MCP port publicly or place the shared secret in repository files/logs. The public repo intentionally contains no credentials.
 
 ## Utils command workers
 
@@ -36,3 +36,16 @@ Add this repository secret:
 Utils dispatches the workflow with a worker ID, display name, and server URL. The runner checks out this public repository, starts `src/utils-command-worker.py`, and opens an authenticated outbound WebSocket to Utils. Commands are sent over that socket; stdout/stderr and exit status are relayed back to the Utils dashboard and MCP. The job is capped at 350 minutes. Stopping a worker cancels its Actions run.
 
 The runner's checkout credential is scoped to this public repository. No private Utils repository token is injected into arbitrary shell commands. If commands need access to a private repository, add a separately scoped credential in a future explicit configuration rather than reusing the worker bootstrap token.
+
+
+## Persistent worker sessions
+
+When a Utils worker is created from a saved session, Utils sends the pinned version's selected components over the already-authenticated TLS WebSocket after the worker handshake. The encryption key stays on the Utils server; it is never provisioned to the runner. The worker restores supported credential files and package inventories before it begins normal provisioning and accepts user commands.
+
+Snapshot extraction is explicit and component-scoped:
+
+- Credentials: GitHub CLI, AWS, gcloud, npm configuration and SSH files under the worker home directory.
+- Packages: APT, Python and global npm inventories.
+- Browser: an existing `~/.config/browser-mcp/auth` directory or a configured `BROWSER_WORKER_PROFILE_DIR` inside the home directory.
+
+Git metadata, `node_modules`, symlinks, and platform bootstrap credentials are excluded. Browser extraction is reported as unavailable when no safe profile directory exists. A partial restore is surfaced as `partially_ready`; it does not silently claim every selected component succeeded.
