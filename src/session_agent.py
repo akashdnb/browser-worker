@@ -29,9 +29,12 @@ _EXCLUDED_NAMES = {
 
 
 def _archive_paths(paths: list[Path]) -> bytes:
+    existing = [path for path in paths if path.exists()]
+    if not existing:
+        return b""
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
-        for path in paths:
+        for path in existing:
             if not path.exists() or path.name in _EXCLUDED_NAMES:
                 continue
             try:
