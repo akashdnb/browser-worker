@@ -369,13 +369,13 @@ async def _start_git_credential_server(request_url: str, request_token: str):
         try:
             command = (await asyncio.wait_for(reader.readline(), timeout=5)).decode("ascii", errors="ignore").strip()
             if command != "get":
-                writer.write(b"\\n")
+                writer.write(b"\n")
             else:
                 token = await asyncio.to_thread(_fetch_oidc_token, request_url, request_token, "utils-git-proxy")
-                writer.write((token + "\\n").encode("utf-8"))
+                writer.write((token + "\n").encode("utf-8"))
             await writer.drain()
         except Exception:
-            writer.write(b"\\n")
+            writer.write(b"\n")
             with contextlib.suppress(Exception):
                 await writer.drain()
         finally:
