@@ -363,7 +363,7 @@ def _fetch_oidc_token(request_url: str, request_token: str, audience: str = "uti
     return token
 
 
-async def _start_git_credential_server(request_url: str, request_token: str):
+async def _start_git_credential_server(request_url: str, request_token: str, server_url: str, worker_id: str):
     """Keep the GitHub OIDC request credential in the agent process, not command environments."""
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -386,14 +386,22 @@ async def _start_git_credential_server(request_url: str, request_token: str):
     server = await asyncio.start_server(handle, "127.0.0.1", 0, limit=1024)
     port = server.sockets[0].getsockname()[1]
     helper_path = os.path.join(tempfile.gettempdir(), f"utils-git-credential-{os.getpid()}")
+    expected_host = urlsplit(server_url).netloc
+    expected_path = f"git-proxy/{worker_id}/"
     helper_source = f"""#!/usr/bin/env python3
 import socket
 import sys
 if len(sys.argv) > 1 and sys.argv[1] != "get":
     raise SystemExit(0)
+fields = {}
 for _line in sys.stdin:
     if not _line.strip():
         break
+    _key, _sep, _value = _line.partition("=")
+    if _sep:
+        fields[_key] = _value
+if fields.get("protocol") != "https" or fields.get("host") != "{expected_host}" or not fields.get("path", "").startswith("{expected_path}"):
+    raise SystemExit(0)
 with socket.create_connection(("127.0.0.1", {port}), timeout=15) as connection:
     connection.sendall(b"get\\n")
     token = connection.makefile("r", encoding="utf-8").readline().strip()
@@ -500,7 +508,7 @@ async def run() -> None:
     git_credential_server = None
     git_helper_path = None
     if oidc_request_url and oidc_request_token:
-        git_credential_server, git_helper_path = await _start_git_credential_server(oidc_request_url, oidc_request_token)
+        git_credential_server, git_helper_path = await _start_git_credential_server(oidc_request_url, oidc_request_token, server_url, worker_id)
     while True:
         try:
             oidc_token = await asyncio.to_thread(_fetch_oidc_token, oidc_request_url, oidc_request_token) if oidc_request_url and oidc_request_token else ""
