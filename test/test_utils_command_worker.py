@@ -21,6 +21,7 @@ class WorkerExecutionEnvironmentTests(unittest.TestCase):
             {"environment": {
                 "UTILS_YOUTUBE_ACCESS_TOKEN": "temporary-access-token",
                 "UTILS_YOUTUBE_GRANTED_SCOPES": "https://www.googleapis.com/auth/youtube.upload",
+                "UTILS_YOUTUBE_UPLOAD_CONFIG": '{"source_url":"https://storage.example/video.mp4?sig=secret"}',
             }},
             {
                 "PATH": "/usr/bin",
