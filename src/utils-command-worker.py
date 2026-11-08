@@ -294,7 +294,7 @@ async def _provision(websocket, profiles_json: str, setup_json: str, restore_err
             await _status(websocket, "failed", str(exc)[:500])
 
 
-_EXECUTION_ENV_KEYS = {"UTILS_YOUTUBE_ACCESS_TOKEN", "UTILS_YOUTUBE_GRANTED_SCOPES"}
+_EXECUTION_ENV_KEYS = {"UTILS_YOUTUBE_ACCESS_TOKEN", "UTILS_YOUTUBE_GRANTED_SCOPES", "UTILS_YOUTUBE_UPLOAD_CONFIG"}
 
 
 def _execution_environment(message: dict, inherited: dict[str, str]) -> dict[str, str]:
@@ -307,7 +307,8 @@ def _execution_environment(message: dict, inherited: dict[str, str]) -> dict[str
     if not isinstance(supplied, dict) or set(supplied) - _EXECUTION_ENV_KEYS:
         raise ValueError("worker execution message contains an unapproved environment key")
     for key, value in supplied.items():
-        if not isinstance(value, str) or not value or len(value) > 8192 or "\x00" in value:
+        max_length = 65536 if key == "UTILS_YOUTUBE_UPLOAD_CONFIG" else 8192
+        if not isinstance(value, str) or not value or len(value) > max_length or "\x00" in value:
             raise ValueError("worker execution message contains an invalid environment value")
         env[key] = value
     return env
