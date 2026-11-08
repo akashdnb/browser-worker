@@ -294,6 +294,25 @@ async def _provision(websocket, profiles_json: str, setup_json: str, restore_err
             await _status(websocket, "failed", str(exc)[:500])
 
 
+_EXECUTION_ENV_KEYS = {"UTILS_YOUTUBE_ACCESS_TOKEN", "UTILS_YOUTUBE_GRANTED_SCOPES"}
+
+
+def _execution_environment(message: dict, inherited: dict[str, str]) -> dict[str, str]:
+    env = inherited.copy()
+    env.pop("UTILS_WORKER_TOKEN", None)
+    env.pop("UTILS_WORKER_AUTH_TOKEN", None)
+    for key in _EXECUTION_ENV_KEYS:
+        env.pop(key, None)
+    supplied = message.get("environment", {})
+    if not isinstance(supplied, dict) or set(supplied) - _EXECUTION_ENV_KEYS:
+        raise ValueError("worker execution message contains an unapproved environment key")
+    for key, value in supplied.items():
+        if not isinstance(value, str) or not value or len(value) > 8192 or "\x00" in value:
+            raise ValueError("worker execution message contains an invalid environment value")
+        env[key] = value
+    return env
+
+
 async def _execute(websocket, message: dict, active_processes: dict) -> None:
     request_id = str(message.get("request_id") or "")
     command = str(message.get("command") or "")
@@ -301,10 +320,8 @@ async def _execute(websocket, message: dict, active_processes: dict) -> None:
     started = time.monotonic()
     timed_out = False
     interrupted = False
-    env = os.environ.copy()
-    env.pop("UTILS_WORKER_TOKEN", None)
-    env.pop("UTILS_WORKER_AUTH_TOKEN", None)
     try:
+        env = _execution_environment(message, os.environ)
         process = await asyncio.create_subprocess_shell(
             command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=env, start_new_session=True,

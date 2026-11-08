@@ -15,6 +15,32 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(worker)
 
 
+class WorkerExecutionEnvironmentTests(unittest.TestCase):
+    def test_injects_only_short_lived_youtube_credentials(self):
+        env = worker._execution_environment(
+            {"environment": {
+                "UTILS_YOUTUBE_ACCESS_TOKEN": "temporary-access-token",
+                "UTILS_YOUTUBE_GRANTED_SCOPES": "https://www.googleapis.com/auth/youtube.upload",
+            }},
+            {
+                "PATH": "/usr/bin",
+                "UTILS_WORKER_TOKEN": "worker-secret",
+                "UTILS_WORKER_AUTH_TOKEN": "worker-auth-secret",
+            },
+        )
+        self.assertEqual(env["UTILS_YOUTUBE_ACCESS_TOKEN"], "temporary-access-token")
+        self.assertNotIn("UTILS_WORKER_TOKEN", env)
+        self.assertNotIn("UTILS_WORKER_AUTH_TOKEN", env)
+
+    def test_rejects_arbitrary_or_invalid_environment_values(self):
+        with self.assertRaisesRegex(ValueError, "unapproved"):
+            worker._execution_environment({"environment": {"PATH": "/tmp"}}, {})
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            worker._execution_environment(
+                {"environment": {"UTILS_YOUTUBE_ACCESS_TOKEN": "x" * 8193}}, {}
+            )
+
+
 class GitCredentialHelperTests(unittest.TestCase):
     def test_helper_requests_oidc_token_and_returns_git_credentials(self):
         async def run_test():
