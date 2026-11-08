@@ -1,4 +1,156 @@
-, str] | None = None) -> None:
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
+
+from websockets.asyncio.client import connect
+
+from session_agent import receive_session_restore, send_session_snapshot
+
+MAX_CHUNK = 16_384
+SETUP_REQUEST_ID = "environment-setup"
+_SEND_LOCK = asyncio.Lock()
+
+
+async def _send_json(websocket, payload: dict) -> None:
+    async with _SEND_LOCK:
+        await websocket.send(json.dumps(payload))
+
+
+async def _status(
+    websocket,
+    status: str,
+    message: str,
+    *,
+    task_id: str | None = None,
+    task_name: str | None = None,
+    task_status: str | None = None,
+    duration_seconds: float | None = None,
+) -> None:
+    payload = {
+        "type": "worker.status",
+        "environment_status": status,
+        "message": message,
+    }
+    if task_id:
+        payload["task"] = {
+            "id": task_id,
+            "name": task_name or task_id,
+            "status": task_status or status,
+            "message": message,
+            "duration_seconds": duration_seconds,
+            "updated_at": time.time(),
+        }
+    await _send_json(websocket, payload)
+
+
+async def _stream_process(
+    websocket,
+    command: list[str] | str,
+    *,
+    request_id: str,
+    shell: bool = False,
+    timeout: int = 600,
+) -> None:
+    process = await asyncio.create_subprocess_shell(
+        command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    ) if shell else await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+
+    async def pump() -> None:
+        while True:
+            chunk = await process.stdout.read(MAX_CHUNK)
+            if not chunk:
+                break
+            await _send_json(websocket, {
+                "type": "worker.output", "request_id": request_id,
+                "stream": "stdout", "data": chunk.decode("utf-8", errors="replace"),
+            })
+
+    pump_task = asyncio.create_task(pump())
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, 9)
+        await process.wait()
+        await pump_task
+        raise RuntimeError(f"Timed out after {timeout}s")
+    await pump_task
+    if process.returncode:
+        raise RuntimeError(f"Exited with code {process.returncode}")
+
+
+async def _run_setup_task(
+    websocket,
+    *,
+    task_id: str,
+    name: str,
+    command: list[str] | str,
+    shell: bool = False,
+    timeout: int = 600,
+    retries: int = 2,
+) -> dict:
+    started = time.monotonic()
+    request_id = f"environment-setup:{task_id}"
+    for attempt in range(1, retries + 2):
+        await _status(
+            websocket, "preparing",
+            f"{name}: attempt {attempt}/{retries + 1}",
+            task_id=task_id, task_name=name, task_status="running",
+        )
+        try:
+            await _stream_process(
+                websocket, command, request_id=request_id,
+                shell=shell, timeout=timeout,
+            )
+            duration = round(time.monotonic() - started, 3)
+            await _status(
+                websocket, "preparing", f"{name}: completed",
+                task_id=task_id, task_name=name, task_status="completed",
+                duration_seconds=duration,
+            )
+            return {"id": task_id, "name": name, "status": "completed", "duration_seconds": duration}
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            await _send_json(websocket, {
+                "type": "worker.output", "request_id": request_id,
+                "stream": "stderr",
+                "data": f"[{name}] attempt {attempt} failed: {detail}\n",
+            })
+            if attempt <= retries:
+                await _status(
+                    websocket, "preparing",
+                    f"{name}: retrying after failure ({attempt}/{retries})",
+                    task_id=task_id, task_name=name, task_status="retrying",
+                )
+                await asyncio.sleep(min(2 ** attempt, 10))
+                continue
+            duration = round(time.monotonic() - started, 3)
+            await _status(
+                websocket, "preparing", f"{name}: failed — {detail}",
+                task_id=task_id, task_name=name, task_status="failed",
+                duration_seconds=duration,
+            )
+            return {
+                "id": task_id, "name": name, "status": "failed",
+                "message": detail, "duration_seconds": duration,
+            }
+
+
+async def _provision(websocket, profiles_json: str, setup_json: str, restore_errors: dict[str, str] | None = None) -> None:
     try:
         profiles = json.loads(profiles_json or '["minimal"]')
         setup = json.loads(setup_json or "{}")
