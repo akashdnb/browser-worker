@@ -28,6 +28,11 @@ on:
         description: JSON custom package/setup object
         required: true
         type: string
+      display_enabled:
+        description: Start an isolated virtual desktop that can be opened from Utils
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: utils-command-worker-${{ inputs.worker_id }}
@@ -60,6 +65,12 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Provision optional virtual desktop
+        if: inputs.display_enabled
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11vnc openbox
+
       - name: Start command worker agent
         env:
           UTILS_WORKER_ID: ${{ inputs.worker_id }}
@@ -69,6 +80,7 @@ jobs:
           UTILS_WORKER_TOKEN: ${{ secrets.UTILS_BROWSER_WORKER_TOKEN }}
           UTILS_WORKER_PROFILES: ${{ inputs.profiles }}
           UTILS_WORKER_CUSTOM_SETUP: ${{ inputs.custom_setup }}
+          UTILS_WORKER_DISPLAY_ENABLED: ${{ inputs.display_enabled }}
         run: |
           test -n "$UTILS_WORKER_TOKEN" || (echo "::error::Set UTILS_BROWSER_WORKER_TOKEN in repository secrets" && exit 1)
           python -m pip install --disable-pip-version-check "websockets>=14.2,<16"
