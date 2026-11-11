@@ -23,6 +23,7 @@ from session_agent import receive_session_restore, send_session_snapshot
 MAX_CHUNK = 16_384
 SETUP_REQUEST_ID = "environment-setup"
 _SEND_LOCK = asyncio.Lock()
+_DISPLAY_BROWSER_STARTED = False
 
 
 async def _send_json(websocket, payload: dict) -> None:
@@ -621,6 +622,7 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
             setup_started.set()
 
             async def provision_worker() -> None:
+                global _DISPLAY_BROWSER_STARTED
                 await _provision(websocket, profiles_json, setup_json, restore_errors)
                 if not display_enabled:
                     return
@@ -628,7 +630,9 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
                     profiles = json.loads(profiles_json or '["minimal"]')
                     if "playwright-chromium" not in profiles:
                         raise RuntimeError("Display-enabled workers require the Playwright + Chromium profile")
-                    await asyncio.to_thread(_start_display_chromium, display_processes)
+                    if not _DISPLAY_BROWSER_STARTED:
+                        await asyncio.to_thread(_start_display_chromium, display_processes)
+                        _DISPLAY_BROWSER_STARTED = True
                     await _send_json(websocket, {"type": "worker.display.ready"})
                 except Exception as exc:
                     print(f"Interactive desktop browser startup failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
