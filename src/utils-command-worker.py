@@ -478,25 +478,28 @@ def _start_virtual_display() -> list[subprocess.Popen]:
         ["openbox", "--sm-disable"],
         ["x11vnc", "-display", display, "-rfbport", "5900", "-localhost", "-nopw", "-forever", "-shared", "-noxdamage"],
     ]
-    for command in commands:
-        processes.append(subprocess.Popen(
-            command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-            env=os.environ.copy(), start_new_session=True,
-        ))
-        if command[0] == "Xvfb":
-            time.sleep(1)
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if any(process.poll() is not None for process in processes):
-            raise RuntimeError("A virtual desktop process exited during startup")
-        try:
-            with socket.create_connection(("127.0.0.1", 5900), timeout=1):
-                print(f"Virtual desktop ready on {display} (VNC localhost:5900)", flush=True)
-                return processes
-        except OSError:
-            time.sleep(0.5)
-    raise RuntimeError("Timed out waiting for the virtual desktop VNC listener")
-
+    try:
+        for command in commands:
+            processes.append(subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                env=os.environ.copy(), start_new_session=True,
+            ))
+            if command[0] == "Xvfb":
+                time.sleep(1)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if any(process.poll() is not None for process in processes):
+                raise RuntimeError("A virtual desktop process exited during startup")
+            try:
+                with socket.create_connection(("127.0.0.1", 5900), timeout=1):
+                    print(f"Virtual desktop ready on {display} (VNC localhost:5900)", flush=True)
+                    return processes
+            except OSError:
+                time.sleep(0.5)
+        raise RuntimeError("Timed out waiting for the virtual desktop VNC listener")
+    except Exception:
+        _stop_virtual_display(processes)
+        raise
 
 def _stop_virtual_display(processes: list[subprocess.Popen]) -> None:
     for process in reversed(processes):
