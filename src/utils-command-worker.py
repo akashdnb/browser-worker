@@ -23,7 +23,8 @@ from session_agent import receive_session_restore, send_session_snapshot
 MAX_CHUNK = 16_384
 SETUP_REQUEST_ID = "environment-setup"
 _SEND_LOCK = asyncio.Lock()
-_DISPLAY_BROWSER_STARTED = False
+_DISPLAY_CHROMIUM_PROCESS: subprocess.Popen | None = None
+_DISPLAY_CHROMIUM_MONITOR: asyncio.Task | None = None
 
 
 async def _send_json(websocket, payload: dict) -> None:
@@ -556,6 +557,27 @@ def _start_display_chromium(processes: list[subprocess.Popen]) -> subprocess.Pop
     raise RuntimeError(f"Timed out waiting for Chromium CDP on 127.0.0.1:{cdp_port}")
 
 
+def _ensure_display_chromium(processes: list[subprocess.Popen]) -> subprocess.Popen:
+    global _DISPLAY_CHROMIUM_PROCESS
+    if _DISPLAY_CHROMIUM_PROCESS is not None and _DISPLAY_CHROMIUM_PROCESS.poll() is None:
+        return _DISPLAY_CHROMIUM_PROCESS
+    _DISPLAY_CHROMIUM_PROCESS = _start_display_chromium(processes)
+    return _DISPLAY_CHROMIUM_PROCESS
+
+
+async def _monitor_display_chromium(processes: list[subprocess.Popen]) -> None:
+    while True:
+        await asyncio.sleep(3)
+        if _DISPLAY_CHROMIUM_PROCESS is not None and _DISPLAY_CHROMIUM_PROCESS.poll() is None:
+            continue
+        try:
+            await asyncio.to_thread(_ensure_display_chromium, processes)
+            print("Interactive Chromium recovered after an unexpected exit", flush=True)
+        except Exception as exc:
+            print(f"Interactive Chromium restart failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            await asyncio.sleep(7)
+
+
 def _stop_virtual_display(processes: list[subprocess.Popen]) -> None:
     for process in reversed(processes):
         if process.poll() is None:
@@ -622,7 +644,7 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
             setup_started.set()
 
             async def provision_worker() -> None:
-                global _DISPLAY_BROWSER_STARTED
+                global _DISPLAY_CHROMIUM_MONITOR
                 await _provision(websocket, profiles_json, setup_json, restore_errors)
                 if not display_enabled:
                     return
@@ -630,9 +652,9 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
                     profiles = json.loads(profiles_json or '["minimal"]')
                     if "playwright-chromium" not in profiles:
                         raise RuntimeError("Display-enabled workers require the Playwright + Chromium profile")
-                    if not _DISPLAY_BROWSER_STARTED:
-                        await asyncio.to_thread(_start_display_chromium, display_processes)
-                        _DISPLAY_BROWSER_STARTED = True
+                    await asyncio.to_thread(_ensure_display_chromium, display_processes)
+                    if _DISPLAY_CHROMIUM_MONITOR is None or _DISPLAY_CHROMIUM_MONITOR.done():
+                        _DISPLAY_CHROMIUM_MONITOR = asyncio.create_task(_monitor_display_chromium(display_processes))
                     await _send_json(websocket, {"type": "worker.display.ready"})
                 except Exception as exc:
                     print(f"Interactive desktop browser startup failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
