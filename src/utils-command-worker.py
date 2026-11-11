@@ -568,54 +568,66 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
         if not setup_started.is_set():
             setup_started.set()
             asyncio.create_task(_provision(websocket, profiles_json, setup_json, restore_errors))
-        while True:
-            message = json.loads(await websocket.recv())
-            if message.get("type") == "worker.exec":
-                asyncio.create_task(_execute(websocket, message, active_processes))
-            elif message.get("type") == "worker.session.extract":
-                asyncio.create_task(send_session_snapshot(
-                    websocket, str(message.get("request_id") or ""),
-                    message.get("components") or [], _send_json,
-                ))
-            elif message.get("type") == "worker.display.start" and display_enabled:
-                client_id = str(message.get("client_id") or "")
-                if client_id and client_id not in display_tasks:
-                    task = asyncio.create_task(_relay_display_client(websocket, client_id, display_writers))
-                    display_tasks[client_id] = task
-                    task.add_done_callback(lambda _task, key=client_id: display_tasks.pop(key, None))
-            elif message.get("type") == "worker.display.input" and display_enabled:
-                client_id = str(message.get("client_id") or "")
-                encoded = message.get("data")
-                writer = display_writers.get(client_id)
-                if writer is not None and isinstance(encoded, str) and len(encoded) <= 100_000:
-                    try:
-                        chunk = base64.b64decode(encoded, validate=True)
-                    except (ValueError, base64.binascii.Error):
-                        continue
-                    writer.write(chunk)
-                    await writer.drain()
-            elif message.get("type") == "worker.display.stop":
-                client_id = str(message.get("client_id") or "")
-                task = display_tasks.pop(client_id, None)
-                if task:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-            elif message.get("type") == "worker.cancel":
-                request_id = str(message.get("request_id") or "")
-                process = active_processes.get(request_id)
-                if process is not None and process.returncode is None:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, 2)
-                    async def force_stop(proc: asyncio.subprocess.Process) -> None:
-                        await asyncio.sleep(5)
-                        if proc.returncode is None:
-                            with contextlib.suppress(ProcessLookupError):
-                                os.killpg(proc.pid, 15)
-                            await asyncio.sleep(2)
-                        if proc.returncode is None:
-                            with contextlib.suppress(ProcessLookupError):
-                                os.killpg(proc.pid, 9)
-                    asyncio.create_task(force_stop(process))
+        try:
+            while True:
+                message = json.loads(await websocket.recv())
+                if message.get("type") == "worker.exec":
+                    asyncio.create_task(_execute(websocket, message, active_processes))
+                elif message.get("type") == "worker.session.extract":
+                    asyncio.create_task(send_session_snapshot(
+                        websocket, str(message.get("request_id") or ""),
+                        message.get("components") or [], _send_json,
+                    ))
+                elif message.get("type") == "worker.display.start" and display_enabled:
+                    client_id = str(message.get("client_id") or "")
+                    if client_id and client_id not in display_tasks:
+                        task = asyncio.create_task(_relay_display_client(websocket, client_id, display_writers))
+                        display_tasks[client_id] = task
+                        task.add_done_callback(lambda _task, key=client_id: display_tasks.pop(key, None))
+                elif message.get("type") == "worker.display.input" and display_enabled:
+                    client_id = str(message.get("client_id") or "")
+                    encoded = message.get("data")
+                    writer = display_writers.get(client_id)
+                    if writer is not None and isinstance(encoded, str) and len(encoded) <= 100_000:
+                        try:
+                            chunk = base64.b64decode(encoded, validate=True)
+                        except (ValueError, base64.binascii.Error):
+                            continue
+                        writer.write(chunk)
+                        await writer.drain()
+                elif message.get("type") == "worker.display.stop":
+                    client_id = str(message.get("client_id") or "")
+                    task = display_tasks.pop(client_id, None)
+                    if task:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                elif message.get("type") == "worker.cancel":
+                    request_id = str(message.get("request_id") or "")
+                    process = active_processes.get(request_id)
+                    if process is not None and process.returncode is None:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(process.pid, 2)
+                        async def force_stop(proc: asyncio.subprocess.Process) -> None:
+                            await asyncio.sleep(5)
+                            if proc.returncode is None:
+                                with contextlib.suppress(ProcessLookupError):
+                                    os.killpg(proc.pid, 15)
+                                await asyncio.sleep(2)
+                            if proc.returncode is None:
+                                with contextlib.suppress(ProcessLookupError):
+                                    os.killpg(proc.pid, 9)
+                        asyncio.create_task(force_stop(process))
+        finally:
+            tasks_to_stop = list(display_tasks.values())
+            for task in tasks_to_stop:
+                task.cancel()
+            if tasks_to_stop:
+                await asyncio.gather(*tasks_to_stop, return_exceptions=True)
+            writers_to_close = list(display_writers.values())
+            for writer in writers_to_close:
+                writer.close()
+            if writers_to_close:
+                await asyncio.gather(*(writer.wait_closed() for writer in writers_to_close), return_exceptions=True)
 
 
 async def run() -> None:
