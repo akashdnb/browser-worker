@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import stat
+import signal
 import subprocess
 import sys
 import tempfile
@@ -637,6 +638,10 @@ async def run() -> None:
     display_processes = await asyncio.to_thread(_start_virtual_display) if display_enabled else []
     if display_processes:
         atexit.register(_stop_virtual_display, display_processes)
+        def stop_display_on_signal(signum, _frame):
+            _stop_virtual_display(display_processes)
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, stop_display_on_signal)
     git_credential_server = None
     git_helper_path = None
     if oidc_request_url and oidc_request_token:
