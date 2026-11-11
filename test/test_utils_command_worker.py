@@ -20,6 +20,36 @@ class VirtualDisplayTests(unittest.TestCase):
         with patch.dict(worker.os.environ, {}, clear=True):
             self.assertEqual(worker._start_virtual_display(), [])
 
+    def test_display_chromium_uses_playwright_binary_and_local_cdp(self):
+        process = subprocess.CompletedProcess(args=[], returncode=0, stdout="/cache/ms-playwright/chromium/chrome\n", stderr="")
+        child = type("Child", (), {"poll": lambda self: None})()
+        with (
+            patch.object(worker, "_playwright_chromium_executable", return_value=process.stdout.strip()),
+            patch.object(worker.subprocess, "Popen", return_value=child) as popen,
+            patch.object(worker.socket, "create_connection") as connect,
+            patch.object(worker.os, "makedirs"),
+            patch.dict(worker.os.environ, {"UTILS_WORKER_DISPLAY": ":99"}, clear=True),
+        ):
+            processes = []
+            self.assertIs(worker._start_display_chromium(processes), child)
+        self.assertEqual(processes, [child])
+        command = popen.call_args.args[0]
+        self.assertIn("--remote-debugging-address=127.0.0.1", command)
+        self.assertIn("--remote-debugging-port=9222", command)
+        self.assertTrue(any(item.startswith("--user-data-dir=") for item in command))
+        self.assertEqual(connect.call_args.args[0], ("127.0.0.1", 9222))
+
+    def test_display_chromium_is_not_duplicated_when_already_running(self):
+        child = type("Child", (), {"poll": lambda self: None})()
+        with patch.object(worker, "_start_display_chromium") as launch:
+            previous = worker._DISPLAY_CHROMIUM_PROCESS
+            try:
+                worker._DISPLAY_CHROMIUM_PROCESS = child
+                self.assertIs(worker._ensure_display_chromium([]), child)
+                launch.assert_not_called()
+            finally:
+                worker._DISPLAY_CHROMIUM_PROCESS = previous
+
 
 class WorkerExecutionEnvironmentTests(unittest.TestCase):
     def test_injects_only_short_lived_youtube_credentials(self):

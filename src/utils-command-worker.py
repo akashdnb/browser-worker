@@ -526,6 +526,9 @@ def _start_display_chromium(processes: list[subprocess.Popen]) -> subprocess.Pop
         os.path.expanduser("~"), ".cache", "utils-worker", "chromium-profile"
     )
     os.makedirs(profile_dir, mode=0o700, exist_ok=True)
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"):
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(os.path.join(profile_dir, lock_name))
     os.environ["UTILS_WORKER_CHROMIUM_BIN"] = executable
     os.environ["UTILS_WORKER_CHROMIUM_USER_DATA_DIR"] = profile_dir
     os.environ["UTILS_WORKER_CHROMIUM_CDP_URL"] = f"http://127.0.0.1:{cdp_port}"
