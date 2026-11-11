@@ -501,6 +501,60 @@ def _start_virtual_display() -> list[subprocess.Popen]:
         _stop_virtual_display(processes)
         raise
 
+def _playwright_chromium_executable() -> str:
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()",
+        ],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    executable = result.stdout.strip().splitlines()
+    if result.returncode != 0 or not executable or not os.path.isfile(executable[-1]):
+        detail = (result.stderr or result.stdout or "Playwright Chromium is not installed")[-500:]
+        raise RuntimeError(f"Could not locate Playwright Chromium: {detail}")
+    return executable[-1]
+
+
+def _start_display_chromium(processes: list[subprocess.Popen]) -> subprocess.Popen:
+    display = os.environ.get("UTILS_WORKER_DISPLAY", ":99")
+    cdp_port = int(os.environ.get("UTILS_WORKER_CHROMIUM_CDP_PORT", "9222"))
+    executable = _playwright_chromium_executable()
+    profile_dir = os.path.join(
+        os.path.expanduser("~"), ".cache", "utils-worker", "chromium-profile"
+    )
+    os.makedirs(profile_dir, mode=0o700, exist_ok=True)
+    os.environ["UTILS_WORKER_CHROMIUM_BIN"] = executable
+    os.environ["UTILS_WORKER_CHROMIUM_USER_DATA_DIR"] = profile_dir
+    os.environ["UTILS_WORKER_CHROMIUM_CDP_URL"] = f"http://127.0.0.1:{cdp_port}"
+    command = [
+        executable, "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+        "--no-first-run", "--no-default-browser-check", "--start-maximized",
+        "--password-store=basic", "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={cdp_port}", "--remote-allow-origins=*",
+        f"--user-data-dir={profile_dir}", "about:blank",
+    ]
+    child = subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        env={**os.environ, "DISPLAY": display}, start_new_session=True,
+    )
+    processes.append(child)
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            raise RuntimeError(f"Playwright Chromium exited during startup (code {child.returncode})")
+        try:
+            with socket.create_connection(("127.0.0.1", cdp_port), timeout=1):
+                print(
+                    f"Playwright Chromium ready on {display}; CDP {os.environ['UTILS_WORKER_CHROMIUM_CDP_URL']}; profile {profile_dir}",
+                    flush=True,
+                )
+                return child
+        except OSError:
+            time.sleep(0.5)
+    raise RuntimeError(f"Timed out waiting for Chromium CDP on 127.0.0.1:{cdp_port}")
+
+
 def _stop_virtual_display(processes: list[subprocess.Popen]) -> None:
     for process in reversed(processes):
         if process.poll() is None:
@@ -552,8 +606,6 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
         if response.get("type") != "worker.auth.ok":
             raise RuntimeError("Utils rejected the worker connection")
         print(f"Worker {worker_id} connected to Utils", flush=True)
-        if display_enabled:
-            await _send_json(websocket, {"type": "worker.display.ready"})
         if response.get("git_proxy_enabled"):
             if not git_helper_path:
                 raise RuntimeError("Git proxy credential helper is unavailable")
@@ -567,7 +619,22 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
         display_tasks: dict[str, asyncio.Task] = {}
         if not setup_started.is_set():
             setup_started.set()
-            asyncio.create_task(_provision(websocket, profiles_json, setup_json, restore_errors))
+
+            async def provision_worker() -> None:
+                await _provision(websocket, profiles_json, setup_json, restore_errors)
+                if not display_enabled:
+                    return
+                try:
+                    profiles = json.loads(profiles_json or '["minimal"]')
+                    if "playwright-chromium" not in profiles:
+                        raise RuntimeError("Display-enabled workers require the Playwright + Chromium profile")
+                    await asyncio.to_thread(_start_display_chromium, display_processes)
+                    await _send_json(websocket, {"type": "worker.display.ready"})
+                except Exception as exc:
+                    print(f"Interactive desktop browser startup failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                    await _status(websocket, "partially_ready", f"Desktop browser startup failed: {str(exc)[:300]}")
+
+            asyncio.create_task(provision_worker())
         try:
             while True:
                 message = json.loads(await websocket.recv())
