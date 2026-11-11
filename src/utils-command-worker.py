@@ -599,7 +599,7 @@ async def _relay_display_client(websocket, client_id: str, writers: dict[str, as
                 await writer.wait_closed()
 
 
-async def _connect_once(socket_url: str, server_url: str, worker_id: str, token: str, oidc_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event, git_helper_path: str | None, display_enabled: bool) -> None:
+async def _connect_once(socket_url: str, server_url: str, worker_id: str, token: str, oidc_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event, git_helper_path: str | None, display_enabled: bool, display_processes: list[subprocess.Popen]) -> None:
     async with connect(socket_url, ping_interval=25, ping_timeout=25, max_size=2**20) as websocket:
         await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token, "oidc_token": oidc_token})
         response = json.loads(await websocket.recv())
@@ -731,7 +731,7 @@ async def run() -> None:
     while True:
         try:
             oidc_token = await asyncio.to_thread(_fetch_oidc_token, oidc_request_url, oidc_request_token) if oidc_request_url and oidc_request_token else ""
-            await _connect_once(socket_url, server_url, worker_id, token, oidc_token, profiles_json, setup_json, setup_started, git_helper_path, display_enabled)
+            await _connect_once(socket_url, server_url, worker_id, token, oidc_token, profiles_json, setup_json, setup_started, git_helper_path, display_enabled, display_processes)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
