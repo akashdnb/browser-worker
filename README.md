@@ -49,3 +49,32 @@ Snapshot extraction is explicit and component-scoped:
 - Browser: an existing `~/.config/browser-mcp/auth` directory or a configured `BROWSER_WORKER_PROFILE_DIR` inside the home directory.
 
 Git metadata, `node_modules`, symlinks, and platform bootstrap credentials are excluded. Browser extraction is reported as unavailable when no safe profile directory exists. A partial restore is surfaced as `partially_ready`; it does not silently claim every selected component succeeded.
+
+
+## Interactive desktop on GitHub-hosted workers
+
+Create a worker with **Enable virtual display**. Utils automatically includes the **Playwright + Chromium** profile, starts Chromium on the worker's Xvfb desktop, and marks the display ready only after Chromium's local CDP endpoint is available. The browser profile lives under `~/.cache/utils-worker/chromium-profile` for the worker's lifetime. Chromium is supervised and restarted if it exits unexpectedly.
+
+Open the worker's **Display** in Utils to interact with that same browser through noVNC. Playwright scripts can attach to the already-running browser instead of launching a second one:
+
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as playwright:
+    browser = playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
+    context = browser.contexts[0]
+    page = context.new_page()
+    page.goto("https://example.com")
+    print(page.title())
+    # Do not call browser.close(): this is the shared desktop browser.
+```
+
+Open another Chromium window using the same profile from the worker terminal:
+
+```bash
+"$UTILS_WORKER_CHROMIUM_BIN" \
+  --user-data-dir="$UTILS_WORKER_CHROMIUM_USER_DATA_DIR" \
+  --new-window about:blank
+```
+
+Other GUI applications can be launched from the worker terminal with `DISPLAY=:99` (for example, install an application with APT first, then run it with `DISPLAY=:99 application-name`). The CDP listener is bound to localhost and is not exposed as a public worker port.
