@@ -15,6 +15,12 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(worker)
 
 
+class VirtualDisplayTests(unittest.TestCase):
+    def test_display_is_disabled_by_default(self):
+        with patch.dict(worker.os.environ, {}, clear=True):
+            self.assertEqual(worker._start_virtual_display(), [])
+
+
 class WorkerExecutionEnvironmentTests(unittest.TestCase):
     def test_injects_only_short_lived_youtube_credentials(self):
         env = worker._execution_environment(

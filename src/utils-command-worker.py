@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
+import base64
 import contextlib
 import json
 import os
+import socket
 import stat
+import signal
 import subprocess
 import sys
 import tempfile
@@ -463,13 +467,93 @@ def _configure_git_proxy(server_url: str, worker_id: str, helper_path: str) -> N
     )
 
 
-async def _connect_once(socket_url: str, server_url: str, worker_id: str, token: str, oidc_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event, git_helper_path: str | None) -> None:
+def _start_virtual_display() -> list[subprocess.Popen]:
+    if os.environ.get("UTILS_WORKER_DISPLAY_ENABLED", "").lower() not in {"1", "true", "yes"}:
+        return []
+    display = os.environ.get("UTILS_WORKER_DISPLAY", ":99")
+    os.environ["DISPLAY"] = display
+    processes: list[subprocess.Popen] = []
+    commands = [
+        ["Xvfb", display, "-screen", "0", "1440x900x24", "-ac", "-nolisten", "tcp", "-noreset"],
+        ["openbox", "--sm-disable"],
+        ["x11vnc", "-display", display, "-rfbport", "5900", "-localhost", "-nopw", "-forever", "-shared", "-noxdamage"],
+    ]
+    try:
+        for command in commands:
+            processes.append(subprocess.Popen(
+                command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                env=os.environ.copy(), start_new_session=True,
+            ))
+            if command[0] == "Xvfb":
+                time.sleep(1)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if any(process.poll() is not None for process in processes):
+                raise RuntimeError("A virtual desktop process exited during startup")
+            try:
+                with socket.create_connection(("127.0.0.1", 5900), timeout=1):
+                    print(f"Virtual desktop ready on {display} (VNC localhost:5900)", flush=True)
+                    return processes
+            except OSError:
+                time.sleep(0.5)
+        raise RuntimeError("Timed out waiting for the virtual desktop VNC listener")
+    except Exception:
+        _stop_virtual_display(processes)
+        raise
+
+def _stop_virtual_display(processes: list[subprocess.Popen]) -> None:
+    for process in reversed(processes):
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+    for process in reversed(processes):
+        if process.poll() is None:
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+
+
+async def _relay_display_client(websocket, client_id: str, writers: dict[str, asyncio.StreamWriter]) -> None:
+    writer = None
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", 5900)
+        writers[client_id] = writer
+        await _send_json(websocket, {"type": "worker.display.connected", "client_id": client_id})
+        while True:
+            chunk = await reader.read(MAX_CHUNK)
+            if not chunk:
+                break
+            await _send_json(websocket, {
+                "type": "worker.display.frame",
+                "client_id": client_id,
+                "data": base64.b64encode(chunk).decode("ascii"),
+            })
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        await _send_json(websocket, {
+            "type": "worker.display.error", "client_id": client_id,
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+        })
+    finally:
+        writers.pop(client_id, None)
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+
+async def _connect_once(socket_url: str, server_url: str, worker_id: str, token: str, oidc_token: str, profiles_json: str, setup_json: str, setup_started: asyncio.Event, git_helper_path: str | None, display_enabled: bool) -> None:
     async with connect(socket_url, ping_interval=25, ping_timeout=25, max_size=2**20) as websocket:
         await _send_json(websocket, {"type": "worker.hello", "worker_id": worker_id, "token": token, "oidc_token": oidc_token})
         response = json.loads(await websocket.recv())
         if response.get("type") != "worker.auth.ok":
             raise RuntimeError("Utils rejected the worker connection")
         print(f"Worker {worker_id} connected to Utils", flush=True)
+        if display_enabled:
+            await _send_json(websocket, {"type": "worker.display.ready"})
         if response.get("git_proxy_enabled"):
             if not git_helper_path:
                 raise RuntimeError("Git proxy credential helper is unavailable")
@@ -479,6 +563,8 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
         for component, error in restore_errors.items():
             await _status(websocket, "preparing", f"Session restore failed for {component}: {error}", task_id=f"session-restore-{component}", task_name=f"Restore {component}", task_status="failed")
         active_processes: dict[str, asyncio.subprocess.Process] = {}
+        display_writers: dict[str, asyncio.StreamWriter] = {}
+        display_tasks: dict[str, asyncio.Task] = {}
         if not setup_started.is_set():
             setup_started.set()
             asyncio.create_task(_provision(websocket, profiles_json, setup_json, restore_errors))
@@ -491,6 +577,29 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
                     websocket, str(message.get("request_id") or ""),
                     message.get("components") or [], _send_json,
                 ))
+            elif message.get("type") == "worker.display.start" and display_enabled:
+                client_id = str(message.get("client_id") or "")
+                if client_id and client_id not in display_tasks:
+                    task = asyncio.create_task(_relay_display_client(websocket, client_id, display_writers))
+                    display_tasks[client_id] = task
+                    task.add_done_callback(lambda _task, key=client_id: display_tasks.pop(key, None))
+            elif message.get("type") == "worker.display.input" and display_enabled:
+                client_id = str(message.get("client_id") or "")
+                encoded = message.get("data")
+                writer = display_writers.get(client_id)
+                if writer is not None and isinstance(encoded, str) and len(encoded) <= 100_000:
+                    try:
+                        chunk = base64.b64decode(encoded, validate=True)
+                    except (ValueError, base64.binascii.Error):
+                        continue
+                    writer.write(chunk)
+                    await writer.drain()
+            elif message.get("type") == "worker.display.stop":
+                client_id = str(message.get("client_id") or "")
+                task = display_tasks.pop(client_id, None)
+                if task:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             elif message.get("type") == "worker.cancel":
                 request_id = str(message.get("request_id") or "")
                 process = active_processes.get(request_id)
@@ -519,6 +628,7 @@ async def run() -> None:
     os.environ.pop("ACTIONS_ID_TOKEN_REQUEST_TOKEN", None)
     profiles_json = os.environ.get("UTILS_WORKER_PROFILES", '["minimal"]')
     setup_json = os.environ.get("UTILS_WORKER_CUSTOM_SETUP", "{}")
+    display_enabled = os.environ.get("UTILS_WORKER_DISPLAY_ENABLED", "false").lower() in {"1", "true", "yes"}
     if not worker_id or not token or not server_url:
         raise RuntimeError("UTILS_WORKER_ID, UTILS_WORKER_SERVER_URL and UTILS_WORKER_TOKEN are required")
     parsed = urlsplit(server_url)
@@ -528,6 +638,13 @@ async def run() -> None:
     socket_url = f"{scheme}://{parsed.netloc}/github-workers/agent"
     delay = 2
     setup_started = asyncio.Event()
+    display_processes = await asyncio.to_thread(_start_virtual_display) if display_enabled else []
+    if display_processes:
+        atexit.register(_stop_virtual_display, display_processes)
+        def stop_display_on_signal(signum, _frame):
+            _stop_virtual_display(display_processes)
+            raise SystemExit(128 + signum)
+        signal.signal(signal.SIGTERM, stop_display_on_signal)
     git_credential_server = None
     git_helper_path = None
     if oidc_request_url and oidc_request_token:
@@ -535,7 +652,7 @@ async def run() -> None:
     while True:
         try:
             oidc_token = await asyncio.to_thread(_fetch_oidc_token, oidc_request_url, oidc_request_token) if oidc_request_url and oidc_request_token else ""
-            await _connect_once(socket_url, server_url, worker_id, token, oidc_token, profiles_json, setup_json, setup_started, git_helper_path)
+            await _connect_once(socket_url, server_url, worker_id, token, oidc_token, profiles_json, setup_json, setup_started, git_helper_path, display_enabled)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
