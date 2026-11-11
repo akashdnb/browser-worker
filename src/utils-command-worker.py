@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
 import base64
 import contextlib
 import json
 import os
 import socket
-import subprocess
 import stat
 import subprocess
 import sys
@@ -576,9 +576,9 @@ async def _connect_once(socket_url: str, server_url: str, worker_id: str, token:
             elif message.get("type") == "worker.display.start" and display_enabled:
                 client_id = str(message.get("client_id") or "")
                 if client_id and client_id not in display_tasks:
-                    display_tasks[client_id] = asyncio.create_task(
-                        _relay_display_client(websocket, client_id, display_writers)
-                    )
+                    task = asyncio.create_task(_relay_display_client(websocket, client_id, display_writers))
+                    display_tasks[client_id] = task
+                    task.add_done_callback(lambda _task, key=client_id: display_tasks.pop(key, None))
             elif message.get("type") == "worker.display.input" and display_enabled:
                 client_id = str(message.get("client_id") or "")
                 encoded = message.get("data")
@@ -635,6 +635,8 @@ async def run() -> None:
     delay = 2
     setup_started = asyncio.Event()
     display_processes = await asyncio.to_thread(_start_virtual_display) if display_enabled else []
+    if display_processes:
+        atexit.register(_stop_virtual_display, display_processes)
     git_credential_server = None
     git_helper_path = None
     if oidc_request_url and oidc_request_token:
